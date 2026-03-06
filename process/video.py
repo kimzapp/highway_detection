@@ -24,51 +24,31 @@ class VideoProcessor:
         model_names: Dict mapping class_id to class name
     """
     
-    def __init__(
-        self,
-        model_path: str,
-        device: str = "cpu",
-        conf_threshold: float = 0.25,
-        iou_threshold: float = 0.5,
-        max_age: int = 90,
-        img_size: int = 640,
-        classes: Optional[list] = None,
-        show_boxes: bool = True,
-        show_labels: bool = True,
-        show_traces: bool = True,
-        trace_length: int = 50
-    ):
+    def __init__(self, args):
         """
         Khởi tạo VideoProcessor
         
-        Args:
-            model_path: Đường dẫn tới YOLO model
-            device: Device để chạy model ('cpu' hoặc 'cuda')
-            conf_threshold: Ngưỡng confidence cho detections
-            iou_threshold: Ngưỡng IoU cho tracking matching
-            max_age: Số frames tối đa giữ track khi không có detection
-            img_size: Kích thước ảnh input cho model
-            classes: List class IDs cần track (None = tất cả)
-            show_boxes: Hiển thị bounding boxes
-            show_labels: Hiển thị labels
-            show_traces: Hiển thị traces
-            trace_length: Độ dài trace
+        Attributes:
+            args: Parsed command-line arguments
+            model: YOLO model được tải lên device
+            tracker: ByteTracker sẽ được khởi tạo sau khi biết fps
+
         """
-        self.model = YOLO(model_path)
-        self.model.to(device)
+        self.model = YOLO(args.model)
+        self.model.to(args.device)
         self.model_names = self.model.names
         
-        self.device = device
-        self.conf_threshold = conf_threshold
-        self.iou_threshold = iou_threshold
-        self.max_age = max_age
-        self.img_size = img_size
-        self.classes = classes
+        self.device = args.device
+        self.conf_threshold = args.conf_thres
+        self.iou_threshold = args.iou_thres
+        self.max_age = args.max_age
+        self.img_size = args.img_size
+        self.classes = args.classes
         
-        self.show_boxes = show_boxes
-        self.show_labels = show_labels
-        self.show_traces = show_traces
-        self.trace_length = trace_length
+        self.show_boxes = args.show_boxes
+        self.show_labels = args.show_labels
+        self.show_traces = args.show_traces
+        self.trace_length = args.trace_length
         
         # Tracker sẽ được khởi tạo khi biết fps
         self.tracker: Optional[ByteTracker] = None
@@ -80,8 +60,8 @@ class VideoProcessor:
         self.bev_transformer: Optional[BirdEyeViewTransformer] = None
         self.bev_visualizer: Optional[BirdEyeViewVisualizer] = None
         self.enable_bev: bool = True  # Enable BEV by default when zone is selected
-        self.bev_width: int = 400
-        self.bev_height: int = 600
+        self.bev_width: int = args.bev_width
+        self.bev_height: int = args.bev_height
         
         # Callback functions
         self._on_frame_callback: Optional[Callable] = None
@@ -272,8 +252,32 @@ class VideoProcessor:
         # Video writer
         writer = None
         if output_path:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            import platform
+            ext = output_path.lower().split('.')[-1]
+            
+            # Chọn codec phù hợp theo OS và extension
+            if platform.system() == 'Windows':
+                if ext == 'avi':
+                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                else:
+                    # Trên Windows, mp4v thường hoạt động tốt hơn
+                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    # Đổi extension sang avi để đảm bảo tương thích
+                    if ext == 'mp4':
+                        output_path = output_path[:-4] + '.avi'
+                        if show_progress:
+                            print(f"Note: Changed output format to .avi for better compatibility")
+            else:
+                # Linux/Mac
+                if ext == 'mp4':
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                elif ext == 'avi':
+                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                else:
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            
             writer = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
+            
             if show_progress:
                 print(f"Output will be saved to: {output_path}")
                 if self.bev_visualizer:

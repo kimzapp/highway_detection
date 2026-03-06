@@ -57,19 +57,7 @@ def parse_args():
 
 def process_video_source(args):
     """Xử lý video file"""
-    processor = VideoProcessor(
-        model_path=args.model,
-        device=args.device,
-        conf_threshold=args.conf_thres,
-        iou_threshold=args.iou_thres,
-        max_age=args.max_age,
-        img_size=args.img_size,
-        classes=args.classes,
-        show_boxes=args.show_boxes,
-        show_labels=args.show_labels,
-        show_traces=args.show_traces,
-        trace_length=args.trace_length
-    )
+    processor = VideoProcessor(args)
     
     # Set BEV options
     processor.enable_bev = args.enable_bev
