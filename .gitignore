@@ -1,3 +1,6 @@
 .vscode
 *.pt
 __pycache__
+*.onnx
+*.mp4
+*.avi
