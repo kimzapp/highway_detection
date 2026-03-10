@@ -7,8 +7,8 @@ import cv2
 import numpy as np
 import supervision as sv
 from typing import Optional, Callable, Dict, Any
-from ultralytics import YOLO
 
+from models import load_model, BaseModelHandler, PTModelHandler
 from tracking.bytetrack import ByteTracker
 from lane_detection.road_zone import RoadZoneSelector, RoadZoneOverlay, MultiRoadZoneOverlay
 from lane_detection.bird_eye_view import (
@@ -23,7 +23,7 @@ class VideoProcessor:
     Video Processor với YOLO detection và ByteTrack tracking
     
     Attributes:
-        model: YOLO model
+        model_handler: Model handler instance (PT, ONNX, etc.)
         tracker: ByteTracker instance
         model_names: Dict mapping class_id to class name
     """
@@ -34,13 +34,13 @@ class VideoProcessor:
         
         Attributes:
             args: Parsed command-line arguments
-            model: YOLO model được tải lên device
+            model_handler: Model handler được tải lên device
             tracker: ByteTracker sẽ được khởi tạo sau khi biết fps
 
         """
-        self.model = YOLO(args.model)
-        self.model.to(args.device)
-        self.model_names = self.model.names
+        # Load model với auto-detection định dạng
+        self.model_handler = load_model(args.model, args.device)
+        self.model_names = self.model_handler.names
         
         self.device = args.device
         self.conf_threshold = args.conf_thres
@@ -223,15 +223,34 @@ class VideoProcessor:
             annotated_frame: Frame đã được annotate
             tracked_detections: Detections với tracker IDs
         """
-        # Run YOLO detection
-        results = self.model(frame, verbose=False, conf=self.conf_threshold, imgsz=self.img_size)
+        # Run detection với model handler
+        results = self.model_handler.predict(
+            frame, 
+            conf=self.conf_threshold, 
+            iou=self.iou_threshold,
+            classes=self.classes,
+            imgsz=self.img_size
+        )
         
         # Convert to supervision Detections
-        detections = sv.Detections.from_ultralytics(results[0])
-        
-        # Filter by classes if specified
-        if self.classes is not None:
-            detections = detections[np.isin(detections.class_id, self.classes)]
+        if isinstance(self.model_handler, PTModelHandler):
+            # Ultralytics model - use built-in converter
+            detections = sv.Detections.from_ultralytics(results[0])
+            # Filter by classes if specified
+            if self.classes is not None:
+                detections = detections[np.isin(detections.class_id, self.classes)]
+        else:
+            # ONNX hoặc model khác - tạo Detections từ boxes, scores, class_ids
+            boxes, scores, class_ids = self.model_handler.get_detections(results)
+            
+            if len(boxes) > 0:
+                detections = sv.Detections(
+                    xyxy=boxes,
+                    confidence=scores,
+                    class_id=class_ids
+                )
+            else:
+                detections = sv.Detections.empty()
         
         # Update tracker and annotate
         annotated_frame, tracked_detections = self.tracker.update_and_annotate(
