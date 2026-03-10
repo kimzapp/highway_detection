@@ -6,7 +6,7 @@ Xử lý video với YOLO detection và ByteTrack tracking
 import cv2
 import numpy as np
 import supervision as sv
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, List
 
 from models import load_model, BaseModelHandler, PTModelHandler
 from tracking.bytetrack import ByteTracker
@@ -16,6 +16,7 @@ from lane_detection.bird_eye_view import (
     IPMBirdEyeViewTransformer, IPMBirdEyeViewVisualizer,
     create_combined_view, create_transformer
 )
+from violations import ViolationDetector, ViolationVisualizer, ViolationType
 
 
 class VideoProcessor:
@@ -72,6 +73,11 @@ class VideoProcessor:
         # Callback functions
         self._on_frame_callback: Optional[Callable] = None
         self._on_detection_callback: Optional[Callable] = None
+        
+        # Violation detection
+        self.violation_detector: Optional[ViolationDetector] = None
+        self.violation_visualizer: Optional[ViolationVisualizer] = None
+        self._current_violations: Dict[int, List[ViolationType]] = {}
     
     def _init_tracker(self, fps: int = 30):
         """Khởi tạo tracker với fps thực tế"""
@@ -343,6 +349,27 @@ class VideoProcessor:
                     alpha=0.2,
                 )
                 
+                # Initialize Violation Detector with valid zones
+                self.violation_detector = ViolationDetector(
+                    min_violation_frames=5,
+                    min_normal_frames=3,
+                    enabled_violations={ViolationType.WRONG_LANE}
+                )
+                # Convert zone_polygons to numpy arrays for detector
+                np_zone_polygons = [np.array(z) for z in zone_polygons]
+                self.violation_detector.set_valid_zones(np_zone_polygons)
+                
+                # Initialize Violation Visualizer
+                self.violation_visualizer = ViolationVisualizer(
+                    detector=self.violation_detector,
+                    show_violation_box=True,
+                    show_violation_label=True,
+                    show_stats_panel=True
+                )
+                
+                if show_progress:
+                    print("Violation Detector initialized (WRONG_LANE detection enabled)")
+                
                 # Initialize Bird's Eye View transformer with primary zone
                 # (uses first zone or combined polygon)
                 if self.enable_bev:
@@ -357,6 +384,10 @@ class VideoProcessor:
                         zone_polygons=zone_polygons,  # Pass all zones for visualization
                         show_progress=show_progress
                     )
+                    
+                    # Set BEV transformer to violation detector
+                    if self.bev_transformer is not None:
+                        self.violation_detector.set_bev_transformer(self.bev_transformer)
                 
                 if show_progress:
                     total_points = sum(len(z) for z in zone_polygons)
@@ -365,6 +396,8 @@ class VideoProcessor:
                 self.road_zone_overlay = None
                 self.bev_transformer = None
                 self.bev_visualizer = None
+                self.violation_detector = None
+                self.violation_visualizer = None
                 if show_progress:
                     print("No road zone defined, skipping...")
             
@@ -428,6 +461,23 @@ class VideoProcessor:
                 
                 # Process frame
                 annotated_frame, tracked_detections = self.process_frame(frame)
+                
+                # Detect violations
+                if self.violation_detector is not None and len(tracked_detections) > 0:
+                    self._current_violations = self.violation_detector.update(
+                        detections=tracked_detections,
+                        class_names=self.model_names,
+                        frame_number=frame_count
+                    )
+                    
+                    # Draw violations on frame
+                    if self.violation_visualizer is not None:
+                        annotated_frame = self.violation_visualizer.draw_violations(
+                            frame=annotated_frame,
+                            detections=tracked_detections,
+                            current_violations=self._current_violations,
+                            frame_number=frame_count
+                        )
                 
                 # Call detection callback if set
                 if self._on_detection_callback and len(tracked_detections) > 0:
