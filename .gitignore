@@ -4,3 +4,4 @@ __pycache__
 *.onnx
 *.mp4
 *.avi
+venv
