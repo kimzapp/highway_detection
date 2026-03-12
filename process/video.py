@@ -628,10 +628,30 @@ class VideoProcessor:
             "frames_processed": frame_count,
             "total_frames": total_frames,
             "stopped_by_user": stopped_by_user,
-            "output_path": output_path
+            "output_path": output_path,
+            "fps_stats": self.fps_counter.get_stats()
         }
     
     def reset_tracker(self):
         """Reset tracker state (useful khi chuyển sang video mới)"""
         if self.tracker:
             self.tracker.tracker.reset()
+    
+    def get_fps_stats(self) -> dict:
+        """
+        Lấy thống kê FPS xử lý.
+        
+        Returns:
+            Dict với các thông số:
+            - fps: FPS tức thời
+            - avg_fps: FPS trung bình (sliding window 30 frames)
+            - overall_fps: FPS tổng thể từ đầu
+            - frame_count: Số frame đã xử lý
+            - elapsed_time: Thời gian xử lý (giây)
+        """
+        return self.fps_counter.get_stats()
+    
+    @property
+    def current_fps(self) -> float:
+        """FPS xử lý hiện tại (trung bình)"""
+        return self.fps_counter.avg_fps

@@ -231,8 +231,9 @@ class ProcessingThread(QThread):
                             frame_number=frame_count
                         )
                 
-                # Add frame info overlay
-                info_text = f"Frame: {frame_count}/{total_frames} | Tracks: {len(tracked_detections)}"
+                # Add frame info overlay with FPS
+                proc_fps = processor.fps_counter.avg_fps
+                info_text = f"Frame: {frame_count}/{total_frames} | Tracks: {len(tracked_detections)} | FPS: {proc_fps:.1f}"
                 cv2.putText(annotated_frame, info_text, (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                 
@@ -260,6 +261,9 @@ class ProcessingThread(QThread):
                     writer.write(display_frame)
                 
                 frame_count += 1
+                
+                # Update FPS counter
+                processor.fps_counter.tick()
                 
                 # Small delay to prevent GUI freezing
                 QThread.msleep(1)
