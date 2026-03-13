@@ -1,5 +1,7 @@
 # 🚗 Highway Detection System
 
+![Logo](assets/logo.png)
+
 Hệ thống giám sát và phân tích giao thông đường cao tốc sử dụng Deep Learning. Hệ thống tích hợp phát hiện đối tượng (YOLO), theo dõi đối tượng (ByteTrack), và phát hiện vi phạm giao thông.
 
 ## 📋 Mục lục
