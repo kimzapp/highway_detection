@@ -4,6 +4,7 @@ Handler cho models định dạng .onnx
 """
 
 from typing import Dict, List, Optional, Any, Tuple
+import traceback
 import numpy as np
 import cv2
 
@@ -89,8 +90,24 @@ class ONNXModelHandler(BaseModelHandler):
             
             return True
             
-        except ImportError:
-            print("Error: onnxruntime không được cài đặt. Chạy: pip install onnxruntime")
+        except ImportError as e:
+            # ImportError trong môi trường frozen thường là lỗi thiếu DLL, không hẳn thiếu package.
+            print("Error: Không thể import onnxruntime.")
+            print(f"  ImportError: {e}")
+            if e.__cause__ is not None:
+                print(f"  Cause: {repr(e.__cause__)}")
+            if e.__context__ is not None:
+                print(f"  Context: {repr(e.__context__)}")
+
+            traceback_text = traceback.format_exc().strip()
+            if traceback_text:
+                print("  Traceback:")
+                print(traceback_text)
+
+            print(
+                "  Gợi ý: nếu traceback có 'DLL load failed' hoặc 'specified module could not be found', "
+                "đây là lỗi thiếu DLL/phụ thuộc runtime, không phải chưa cài pip package."
+            )
             return False
         except Exception as e:
             print(f"Error loading ONNX model: {e}")
