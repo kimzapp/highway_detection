@@ -46,9 +46,9 @@ def check_dependencies():
                 import PyInstaller
             else:
                 __import__(pkg)
-            print(f"  ✓ {pkg}")
+            print(f"  [OK] {pkg}")
         except ImportError:
-            print(f"  ✗ {pkg} - MISSING")
+            print(f"  [MISSING] {pkg}")
             missing.append(pkg)
     
     if missing:
@@ -108,12 +108,12 @@ def verify_build():
     
     if exe_path.exists():
         size_mb = exe_path.stat().st_size / (1024 * 1024)
-        print(f"\n✓ Build successful!")
+        print(f"\nBuild successful!")
         print(f"  Output: {exe_path}")
         print(f"  Size: {size_mb:.1f} MB")
         return True
     else:
-        print("\n✗ Build failed - executable not found")
+        print("\nBuild failed - executable not found")
         return False
 
 
