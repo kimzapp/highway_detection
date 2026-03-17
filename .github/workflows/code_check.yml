@@ -1,4 +1,4 @@
-name: <DEV> Code Check
+name: <MASTER> Code Check
 
 on:
   push:
