@@ -3,6 +3,7 @@ Video Processing Module
 Xử lý video với YOLO detection và ByteTrack tracking
 """
 
+import time
 import cv2
 import numpy as np
 import supervision as sv
@@ -237,17 +238,24 @@ class VideoProcessor:
         """
         self._on_detection_callback = callback
     
-    def process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, sv.Detections]:
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        return_timing: bool = False
+    ) -> tuple[np.ndarray, sv.Detections] | tuple[np.ndarray, sv.Detections, Dict[str, float]]:
         """
         Xử lý một frame: detect và track
         
         Args:
             frame: Input frame (BGR)
+            return_timing: Nếu True, trả thêm dict thời gian inference/tracking (giây)
             
         Returns:
             annotated_frame: Frame đã được annotate
             tracked_detections: Detections với tracker IDs
         """
+        inference_start = time.perf_counter()
+
         # Run detection với model handler (sử dụng half precision nếu có)
         results = self.model_handler.predict(
             frame, 
@@ -278,6 +286,10 @@ class VideoProcessor:
             else:
                 detections = sv.Detections.empty()
         
+        inference_elapsed = time.perf_counter() - inference_start
+
+        tracking_start = time.perf_counter()
+
         # Update tracker and annotate (in-place để tránh copy)
         annotated_frame, tracked_detections = self.tracker.update_and_annotate(
             scene=frame,
@@ -285,6 +297,8 @@ class VideoProcessor:
             labels=None,
             copy_scene=False  # In-place để giảm memory copy mỗi frame
         )
+
+        tracking_elapsed = time.perf_counter() - tracking_start
         
         # Draw road zone overlay if defined
         if self.road_zone_overlay is not None:
@@ -307,6 +321,12 @@ class VideoProcessor:
                     labels=labels
                 )
         
+        if return_timing:
+            return annotated_frame, tracked_detections, {
+                "inference": inference_elapsed,
+                "tracking": tracking_elapsed,
+            }
+
         return annotated_frame, tracked_detections
     
     def process_video(

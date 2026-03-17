@@ -212,7 +212,8 @@ class ProcessingThread(QThread):
         frame_count = 0
         benchmark_every = 120
         timing_totals = {
-            "process_frame": 0.0,
+            "inference": 0.0,
+            "tracking": 0.0,
             "violations": 0.0,
             "bev": 0.0,
             "ui_emit": 0.0,
@@ -232,9 +233,12 @@ class ProcessingThread(QThread):
                     break
                 
                 # Process frame
-                stage_start = time.perf_counter()
-                annotated_frame, tracked_detections = processor.process_frame(frame)
-                timing_totals["process_frame"] += time.perf_counter() - stage_start
+                annotated_frame, tracked_detections, process_timing = processor.process_frame(
+                    frame,
+                    return_timing=True,
+                )
+                timing_totals["inference"] += process_timing["inference"]
+                timing_totals["tracking"] += process_timing["tracking"]
                 
                 # Detect violations
                 stage_start = time.perf_counter()
@@ -304,7 +308,8 @@ class ProcessingThread(QThread):
 
                 if frame_count % benchmark_every == 0:
                     avg_total = timing_totals["total"] / frame_count * 1000.0
-                    avg_infer = timing_totals["process_frame"] / frame_count * 1000.0
+                    avg_infer = timing_totals["inference"] / frame_count * 1000.0
+                    avg_track = timing_totals["tracking"] / frame_count * 1000.0
                     avg_viol = timing_totals["violations"] / frame_count * 1000.0
                     avg_bev = timing_totals["bev"] / frame_count * 1000.0
                     avg_ui = timing_totals["ui_emit"] / frame_count * 1000.0
@@ -312,7 +317,7 @@ class ProcessingThread(QThread):
                     print(
                         "[Perf] "
                         f"frames={frame_count} total={avg_total:.2f}ms "
-                        f"infer+track={avg_infer:.2f}ms violations={avg_viol:.2f}ms "
+                        f"infer={avg_infer:.2f}ms track={avg_track:.2f}ms violations={avg_viol:.2f}ms "
                         f"bev={avg_bev:.2f}ms ui={avg_ui:.2f}ms write={avg_write:.2f}ms"
                     )
                 
@@ -325,7 +330,8 @@ class ProcessingThread(QThread):
                 print(
                     "[Perf] Final averages: "
                     f"total={timing_totals['total'] / frame_count * 1000.0:.2f}ms, "
-                    f"infer+track={timing_totals['process_frame'] / frame_count * 1000.0:.2f}ms, "
+                    f"infer={timing_totals['inference'] / frame_count * 1000.0:.2f}ms, "
+                    f"track={timing_totals['tracking'] / frame_count * 1000.0:.2f}ms, "
                     f"violations={timing_totals['violations'] / frame_count * 1000.0:.2f}ms, "
                     f"bev={timing_totals['bev'] / frame_count * 1000.0:.2f}ms, "
                     f"ui={timing_totals['ui_emit'] / frame_count * 1000.0:.2f}ms, "
