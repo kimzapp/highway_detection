@@ -37,7 +37,7 @@ jobs:
       - name: Build PyInstaller app
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean vision_app.spec
+          python scripts/build.py --clean
 
       - name: Verify build output
         shell: pwsh
