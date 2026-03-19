@@ -128,6 +128,10 @@ class ONNXModelHandler(BaseModelHandler):
             # Tạo session
             sess_options = ort.SessionOptions()
             sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_options.intra_op_num_threads = 4 # Tăng số thread để cải thiện hiệu năng trên CPU
+            sess_options.enable_mem_pattern = True
+            sess_options.enable_cpu_mem_arena = True
+            
             
             self._session = ort.InferenceSession(
                 self.model_path,
