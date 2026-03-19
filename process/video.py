@@ -4,6 +4,8 @@ Xử lý video với YOLO detection và ByteTrack tracking
 """
 
 import time
+import multiprocessing as mp
+import queue
 import cv2
 import numpy as np
 import supervision as sv
@@ -19,6 +21,139 @@ from lane_mapping.bird_eye_view import (
 )
 from violations import ViolationDetector, ViolationVisualizer, ViolationType
 from .fps_counter import FPSCounter
+
+
+def _video_writer_process_main(
+    output_path: str,
+    fourcc_code: str,
+    fps: int,
+    frame_size: tuple[int, int],
+    frame_queue,
+    status_queue,
+):
+    """Worker process: open writer and consume frames from queue."""
+    writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*fourcc_code), fps, frame_size)
+    if not writer.isOpened():
+        status_queue.put({"state": "error", "message": f"Cannot open output writer: {output_path}"})
+        return
+
+    status_queue.put({"state": "ready"})
+
+    try:
+        while True:
+            frame = frame_queue.get()
+            if frame is None:
+                break
+            writer.write(frame)
+    except Exception as exc:
+        status_queue.put({"state": "error", "message": str(exc)})
+    finally:
+        writer.release()
+        status_queue.put({"state": "done"})
+
+
+class AsyncVideoWriter:
+    """Video writer in a dedicated process to reduce impact on main processing FPS."""
+
+    def __init__(
+        self,
+        output_path: str,
+        fourcc_code: str,
+        fps: int,
+        frame_size: tuple[int, int],
+        max_queue_size: int = 240,
+    ):
+        self._ctx = mp.get_context("spawn")
+        self._frame_queue = self._ctx.Queue(maxsize=max_queue_size)
+        self._status_queue = self._ctx.Queue(maxsize=16)
+        self._proc = self._ctx.Process(
+            target=_video_writer_process_main,
+            args=(output_path, fourcc_code, fps, frame_size, self._frame_queue, self._status_queue),
+            name="AsyncVideoWriterProcess",
+            daemon=True,
+        )
+        self._closed = False
+        self._started = False
+        self._error: Optional[str] = None
+        self._dropped_frames = 0
+
+    @property
+    def dropped_frames(self) -> int:
+        return self._dropped_frames
+
+    def start(self, timeout_s: float = 10.0):
+        if self._started:
+            return
+
+        self._proc.start()
+        self._started = True
+
+        try:
+            status = self._status_queue.get(timeout=timeout_s)
+        except queue.Empty as exc:
+            raise RuntimeError("Timeout waiting for writer process startup") from exc
+
+        if status.get("state") != "ready":
+            self._error = status.get("message", "Writer process failed to start")
+            raise RuntimeError(self._error)
+
+    def write(self, frame: np.ndarray):
+        self._poll_status_queue()
+
+        if self._closed:
+            raise RuntimeError("Cannot write to closed AsyncVideoWriter")
+        if self._error is not None:
+            raise RuntimeError(self._error)
+
+        # Non-blocking enqueue to keep processing loop responsive.
+        try:
+            self._frame_queue.put_nowait(frame)
+        except queue.Full:
+            # Drop oldest frame when queue is saturated, then enqueue newest frame.
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+            try:
+                self._frame_queue.put_nowait(frame)
+            except queue.Full:
+                self._dropped_frames += 1
+
+    def close(self, timeout_s: float = 30.0):
+        self._poll_status_queue()
+
+        if self._closed:
+            return
+        self._closed = True
+
+        if self._started:
+            try:
+                self._frame_queue.put(None, timeout=2.0)
+            except queue.Full:
+                # Force termination path if writer is not draining.
+                self._proc.terminate()
+
+            self._proc.join(timeout=timeout_s)
+            if self._proc.is_alive():
+                self._proc.terminate()
+                self._proc.join(timeout=5.0)
+
+        # Surface any writer-side error reported before shutdown.
+        self._poll_status_queue()
+
+        if self._error is not None:
+            raise RuntimeError(self._error)
+
+    def _poll_status_queue(self):
+        while True:
+            try:
+                status = self._status_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if status.get("state") == "error":
+                self._error = status.get("message", "Unknown writer process error")
 
 
 class VideoProcessor:
@@ -520,18 +655,19 @@ class VideoProcessor:
             output_width = width + bev_display_width
         
         # Video writer
-        writer = None
+        async_writer = None
         if output_path:
             import platform
             ext = output_path.lower().split('.')[-1]
+            fourcc_code = 'XVID'
             
             # Chọn codec phù hợp theo OS và extension
             if platform.system() == 'Windows':
                 if ext == 'avi':
-                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    fourcc_code = 'XVID'
                 else:
                     # Trên Windows, mp4v thường hoạt động tốt hơn
-                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    fourcc_code = 'XVID'
                     # Đổi extension sang avi để đảm bảo tương thích
                     if ext == 'mp4':
                         output_path = output_path[:-4] + '.avi'
@@ -540,13 +676,20 @@ class VideoProcessor:
             else:
                 # Linux/Mac
                 if ext == 'mp4':
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    fourcc_code = 'mp4v'
                 elif ext == 'avi':
-                    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                    fourcc_code = 'XVID'
                 else:
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            
-            writer = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
+                    fourcc_code = 'mp4v'
+
+            # Use separate process for disk/video encoding writes.
+            async_writer = AsyncVideoWriter(
+                output_path=output_path,
+                fourcc_code=fourcc_code,
+                fps=fps,
+                frame_size=(output_width, output_height),
+            )
+            async_writer.start()
             
             if show_progress:
                 print(f"Output will be saved to: {output_path}")
@@ -635,9 +778,9 @@ class VideoProcessor:
                             print("Stopped by user")
                         break
                 
-                # Save frame
-                if writer:
-                    writer.write(display_frame)
+                # Save frame asynchronously to avoid blocking processing loop.
+                if async_writer:
+                    async_writer.write(display_frame)
                 
                 frame_count += 1
                 
@@ -652,9 +795,12 @@ class VideoProcessor:
         finally:
             # Cleanup
             cap.release()
-            if writer:
-                writer.release()
+            if async_writer:
+                async_writer.close()
             cv2.destroyAllWindows()
+
+        if show_progress and async_writer and async_writer.dropped_frames > 0:
+            print(f"Dropped frames while writing: {async_writer.dropped_frames}")
         
         if show_progress:
             print(f"\nDone! Processed {frame_count} frames")

@@ -145,7 +145,7 @@ class ProcessingConfig:
     
     # Tracker settings  
     max_age: int = 90
-    trace_length: int = 50
+    trace_length: int = 25
     
     # Visualization settings
     show_boxes: bool = True

@@ -68,7 +68,7 @@ class ProcessingThread(QThread):
     def run(self):
         """Chạy xử lý video"""
         try:
-            from process.video import VideoProcessor
+            from process.video import VideoProcessor, AsyncVideoWriter
             
             # Create args-like object
             args = self._create_args()
@@ -89,7 +89,8 @@ class ProcessingThread(QThread):
             self._process_video_for_gui(
                 video_path=args.input,
                 output_path=output_path,
-                preset_zones=self._config.zones if self._config.zones else None
+                preset_zones=self._config.zones if self._config.zones else None,
+                writer_class=AsyncVideoWriter,
             )
             
             self.processing_completed.emit()
@@ -99,7 +100,7 @@ class ProcessingThread(QThread):
             traceback.print_exc()
             self.error_occurred.emit(str(e))
     
-    def _process_video_for_gui(self, video_path: str, output_path: Optional[str], preset_zones):
+    def _process_video_for_gui(self, video_path: str, output_path: Optional[str], preset_zones, writer_class=None):
         """Xử lý video và emit frame về GUI thay vì dùng cv2.imshow"""
         from lane_mapping.road_zone import MultiRoadZoneOverlay
         from lane_mapping.bird_eye_view import create_combined_view
@@ -190,22 +191,40 @@ class ProcessingThread(QThread):
             bev_display_width = int(processor.bev_transformer.bev_width * bev_scale)
             output_width = width + bev_display_width
         
-        writer = None
+        async_writer = None
         if output_path:
             ext = output_path.lower().split('.')[-1]
+            fourcc_code = 'mp4v'
 
             # Match codec to selected container while keeping the chosen extension.
             if ext == 'avi':
-                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                fourcc_code = 'XVID'
             else:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                fourcc_code = 'mp4v'
 
-            writer = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
+            if writer_class is None:
+                raise ValueError("writer_class is required for GUI async writing")
 
-            if not writer.isOpened() and ext != 'avi':
-                # Fallback codec for systems where mp4v cannot be opened.
-                fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                writer = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
+            try:
+                async_writer = writer_class(
+                    output_path=output_path,
+                    fourcc_code=fourcc_code,
+                    fps=fps,
+                    frame_size=(output_width, output_height),
+                )
+                async_writer.start()
+            except Exception:
+                if ext != 'avi':
+                    # Fallback codec for systems where mp4v cannot be opened.
+                    async_writer = writer_class(
+                        output_path=output_path,
+                        fourcc_code='XVID',
+                        fps=fps,
+                        frame_size=(output_width, output_height),
+                    )
+                    async_writer.start()
+                else:
+                    raise
 
             print(f"Output will be saved to: {output_path}")
         
@@ -295,8 +314,8 @@ class ProcessingThread(QThread):
                 
                 # Save frame
                 stage_start = time.perf_counter()
-                if writer:
-                    writer.write(display_frame)
+                if async_writer:
+                    async_writer.write(display_frame)
                 timing_totals["write"] += time.perf_counter() - stage_start
                 
                 frame_count += 1
@@ -323,9 +342,11 @@ class ProcessingThread(QThread):
                 
         finally:
             cap.release()
-            if writer:
-                writer.release()
+            if async_writer:
+                async_writer.close()
             print(f"Processed {frame_count} frames")
+            if async_writer and async_writer.dropped_frames > 0:
+                print(f"Dropped frames while writing: {async_writer.dropped_frames}")
             if frame_count > 0:
                 print(
                     "[Perf] Final averages: "
