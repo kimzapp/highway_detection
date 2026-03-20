@@ -146,6 +146,7 @@ class ProcessingConfig:
     # Tracker settings  
     max_age: int = 90
     trace_length: int = 25
+    skip_frames: int = 2
     
     # Visualization settings
     show_boxes: bool = True
@@ -174,6 +175,7 @@ class ProcessingConfig:
             'classes': self.classes,
             'max_age': self.max_age,
             'trace_length': self.trace_length,
+            'skip_frames': self.skip_frames,
             'show_boxes': self.show_boxes,
             'show_labels': self.show_labels,
             'show_traces': self.show_traces,
@@ -548,6 +550,14 @@ class ConfigPanel(QWidget):
         self._trace_length_spin.setMinimumHeight(35)
         self._trace_length_spin.setToolTip("Độ dài của vệt theo dõi hiển thị")
         tracker_layout.addWidget(self._trace_length_spin, 1, 1)
+
+        tracker_layout.addWidget(QLabel("Skip Frames:"), 2, 0)
+        self._skip_frames_spin = QSpinBox()
+        self._skip_frames_spin.setRange(0, 10)
+        self._skip_frames_spin.setValue(2)
+        self._skip_frames_spin.setMinimumHeight(35)
+        self._skip_frames_spin.setToolTip("Số frame bỏ qua trước khi chạy detect/track lại")
+        tracker_layout.addWidget(self._skip_frames_spin, 2, 1)
         
         tracker_layout.setColumnStretch(2, 1)
         
@@ -557,7 +567,8 @@ class ConfigPanel(QWidget):
         info_label = QLabel(
             "💡 <b>Gợi ý:</b><br>"
             "• <b>Max Age</b>: Tăng nếu xe bị che khuất lâu<br>"
-            "• <b>Trace Length</b>: Tăng để thấy quỹ đạo dài hơn"
+            "• <b>Trace Length</b>: Tăng để thấy quỹ đạo dài hơn<br>"
+            "• <b>Skip Frames</b>: 2-3 giúp tăng FPS đáng kể"
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("""
@@ -862,6 +873,7 @@ class ConfigPanel(QWidget):
         # Tracker
         self._max_age_spin.setValue(self._config.max_age)
         self._trace_length_spin.setValue(self._config.trace_length)
+        self._skip_frames_spin.setValue(self._config.skip_frames)
         
         # Visualization
         self._show_boxes_check.setChecked(self._config.show_boxes)
@@ -894,6 +906,7 @@ class ConfigPanel(QWidget):
         
         self._config.max_age = self._max_age_spin.value()
         self._config.trace_length = self._trace_length_spin.value()
+        self._config.skip_frames = self._skip_frames_spin.value()
         
         self._config.show_boxes = self._show_boxes_check.isChecked()
         self._config.show_labels = self._show_labels_check.isChecked()

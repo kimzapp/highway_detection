@@ -229,6 +229,7 @@ class ProcessingThread(QThread):
             print(f"Output will be saved to: {output_path}")
         
         frame_count = 0
+        inferred_frame_count = 0
         benchmark_every = 120
         timing_totals = {
             "inference": 0.0,
@@ -239,6 +240,7 @@ class ProcessingThread(QThread):
             "write": 0.0,
             "total": 0.0,
         }
+        cached_detections = None
         last_preview_emit_ts = 0.0
         print("Processing...")
         print(f"  Tracker visualization: boxes={processor.show_boxes}, labels={processor.show_labels}, traces={processor.show_traces}")
@@ -251,15 +253,29 @@ class ProcessingThread(QThread):
                 if not ret:
                     break
                 
-                # Process frame
-                annotated_frame, tracked_detections, process_timing = processor.process_frame(
-                    frame,
-                    return_timing=True,
+                should_process_frame = (
+                    processor.skip_frames <= 0
+                    or frame_count % (processor.skip_frames + 1) == 0
+                    or frame_count == 0
                 )
-                timing_totals["inference"] += process_timing["inference"]
-                timing_totals["tracking"] += process_timing["tracking"]
-                
-                # Detect violations
+
+                if should_process_frame:
+                    inferred_frame_count += 1
+                    infer_start = time.perf_counter()
+                    cached_detections = processor.infer_detections(frame)
+                    timing_totals["inference"] += time.perf_counter() - infer_start
+                else:
+                    if cached_detections is None:
+                        from supervision import Detections
+                        cached_detections = Detections.empty()
+
+                track_start = time.perf_counter()
+                annotated_frame, tracked_detections = processor.track_with_detections(
+                    frame,
+                    cached_detections,
+                )
+                timing_totals["tracking"] += time.perf_counter() - track_start
+
                 stage_start = time.perf_counter()
                 if processor.violation_detector is not None and len(tracked_detections) > 0:
                     processor._current_violations = processor.violation_detector.update(
@@ -267,15 +283,17 @@ class ProcessingThread(QThread):
                         class_names=processor.model_names,
                         frame_number=frame_count
                     )
-                    
-                    if processor.violation_visualizer is not None:
-                        annotated_frame = processor.violation_visualizer.draw_violations(
-                            frame=annotated_frame,
-                            detections=tracked_detections,
-                            current_violations=processor._current_violations,
-                            frame_number=frame_count,
-                            copy_frame=False,
-                        )
+                else:
+                    processor._current_violations = {}
+
+                if processor.violation_visualizer is not None and len(tracked_detections) > 0:
+                    annotated_frame = processor.violation_visualizer.draw_violations(
+                        frame=annotated_frame,
+                        detections=tracked_detections,
+                        current_violations=processor._current_violations,
+                        frame_number=frame_count,
+                        copy_frame=False,
+                    )
                 timing_totals["violations"] += time.perf_counter() - stage_start
                 
                 # Add frame info overlay with FPS
@@ -337,7 +355,8 @@ class ProcessingThread(QThread):
                         "[Perf] "
                         f"frames={frame_count} total={avg_total:.2f}ms "
                         f"infer={avg_infer:.2f}ms track={avg_track:.2f}ms violations={avg_viol:.2f}ms "
-                        f"bev={avg_bev:.2f}ms ui={avg_ui:.2f}ms write={avg_write:.2f}ms"
+                        f"bev={avg_bev:.2f}ms ui={avg_ui:.2f}ms write={avg_write:.2f}ms "
+                        f"inferred={inferred_frame_count}"
                     )
                 
         finally:
@@ -345,6 +364,7 @@ class ProcessingThread(QThread):
             if async_writer:
                 async_writer.close()
             print(f"Processed {frame_count} frames")
+            print(f"Inference ran on {inferred_frame_count} frames (skip={processor.skip_frames})")
             if async_writer and async_writer.dropped_frames > 0:
                 print(f"Dropped frames while writing: {async_writer.dropped_frames}")
             if frame_count > 0:
@@ -388,6 +408,7 @@ class ProcessingThread(QThread):
         
         args.max_age = pc.max_age
         args.trace_length = pc.trace_length
+        args.skip_frames = pc.skip_frames
         
         args.show_boxes = pc.show_boxes
         args.show_labels = pc.show_labels
