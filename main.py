@@ -63,6 +63,8 @@ def parse_args():
                         help="Disable FP16 half-precision inference")
     parser.add_argument("--skip-bev-frames", type=int, default=0,
                         help="Skip BEV update every N frames (0=no skip, higher=faster but less smooth)")
+    parser.add_argument("--skip-frames", type=int, default=2,
+                        help="Skip detection/tracking every N frames (2 => process 1 frame then skip 2)")
     
     return parser.parse_args()
 

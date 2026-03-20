@@ -201,6 +201,7 @@ class VideoProcessor:
         
         # Performance optimization options
         self.use_half = getattr(args, 'half', True)  # Use FP16 for GPU
+        self.skip_frames = max(0, int(getattr(args, 'skip_frames', 2)))  # Process every N+1 frames
         self.skip_bev_frames = getattr(args, 'skip_bev_frames', 0)  # Skip BEV every N frames
         
         # Tracker sẽ được khởi tạo khi biết fps
@@ -390,7 +391,23 @@ class VideoProcessor:
             tracked_detections: Detections với tracker IDs
         """
         inference_start = time.perf_counter()
+        detections = self.infer_detections(frame)
+        inference_elapsed = time.perf_counter() - inference_start
 
+        tracking_start = time.perf_counter()
+        annotated_frame, tracked_detections = self.track_with_detections(frame, detections)
+        tracking_elapsed = time.perf_counter() - tracking_start
+
+        if return_timing:
+            return annotated_frame, tracked_detections, {
+                "inference": inference_elapsed,
+                "tracking": tracking_elapsed,
+            }
+
+        return annotated_frame, tracked_detections
+
+    def infer_detections(self, frame: np.ndarray) -> sv.Detections:
+        """Run model inference and convert output to supervision detections."""
         # Run detection với model handler (sử dụng half precision nếu có)
         results = self.model_handler.predict(
             frame, 
@@ -420,10 +437,15 @@ class VideoProcessor:
                 )
             else:
                 detections = sv.Detections.empty()
-        
-        inference_elapsed = time.perf_counter() - inference_start
 
-        tracking_start = time.perf_counter()
+        return detections
+
+    def track_with_detections(
+        self,
+        frame: np.ndarray,
+        detections: sv.Detections,
+    ) -> tuple[np.ndarray, sv.Detections]:
+        """Update tracker using provided detections and draw overlays."""
 
         # Update tracker and annotate (in-place để tránh copy)
         annotated_frame, tracked_detections = self.tracker.update_and_annotate(
@@ -432,8 +454,6 @@ class VideoProcessor:
             labels=None,
             copy_scene=False  # In-place để giảm memory copy mỗi frame
         )
-
-        tracking_elapsed = time.perf_counter() - tracking_start
         
         # Draw road zone overlay if defined
         if self.road_zone_overlay is not None:
@@ -455,12 +475,6 @@ class VideoProcessor:
                     detections=tracked_detections,
                     labels=labels
                 )
-        
-        if return_timing:
-            return annotated_frame, tracked_detections, {
-                "inference": inference_elapsed,
-                "tracking": tracking_elapsed,
-            }
 
         return annotated_frame, tracked_detections
     
@@ -697,7 +711,9 @@ class VideoProcessor:
                     print(f"Output resolution: {output_width}x{output_height} (with BEV)")
         
         frame_count = 0
+        inferred_frame_count = 0
         stopped_by_user = False
+        cached_detections = sv.Detections.empty()
         
         if show_progress:
             print("Processing... Press 'q' to quit")
@@ -707,26 +723,40 @@ class VideoProcessor:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                
-                # Process frame
-                annotated_frame, tracked_detections = self.process_frame(frame)
-                
-                # Detect violations
+
+                should_process_frame = (
+                    self.skip_frames <= 0
+                    or frame_count % (self.skip_frames + 1) == 0
+                    or frame_count == 0
+                )
+
+                if should_process_frame:
+                    inferred_frame_count += 1
+                    cached_detections = self.infer_detections(frame)
+
+                # Always update tracker. On skipped frames it receives cached detections.
+                annotated_frame, tracked_detections = self.track_with_detections(
+                    frame,
+                    cached_detections,
+                )
+
                 if self.violation_detector is not None and len(tracked_detections) > 0:
                     self._current_violations = self.violation_detector.update(
                         detections=tracked_detections,
                         class_names=self.model_names,
                         frame_number=frame_count
                     )
-                    
-                    # Draw violations on frame
-                    if self.violation_visualizer is not None:
-                        annotated_frame = self.violation_visualizer.draw_violations(
-                            frame=annotated_frame,
-                            detections=tracked_detections,
-                            current_violations=self._current_violations,
-                            frame_number=frame_count
-                        )
+                else:
+                    self._current_violations = {}
+
+                # Draw violations on both processed and skipped frames with latest state.
+                if self.violation_visualizer is not None and len(tracked_detections) > 0:
+                    annotated_frame = self.violation_visualizer.draw_violations(
+                        frame=annotated_frame,
+                        detections=tracked_detections,
+                        current_violations=self._current_violations,
+                        frame_number=frame_count
+                    )
                 
                 # Call detection callback if set
                 if self._on_detection_callback and len(tracked_detections) > 0:
@@ -790,7 +820,10 @@ class VideoProcessor:
                 # Print progress
                 if show_progress and frame_count % 100 == 0:
                     progress = 100 * frame_count / total_frames if total_frames > 0 else 0
-                    print(f"Processed {frame_count}/{total_frames} frames ({progress:.1f}%)")
+                    print(
+                        f"Processed {frame_count}/{total_frames} frames ({progress:.1f}%), "
+                        f"inferred={inferred_frame_count}"
+                    )
         
         finally:
             # Cleanup
@@ -804,11 +837,13 @@ class VideoProcessor:
         
         if show_progress:
             print(f"\nDone! Processed {frame_count} frames")
+            print(f"Inference ran on {inferred_frame_count} frames (skip={self.skip_frames})")
             if output_path:
                 print(f"Output saved to: {output_path}")
         
         return {
             "frames_processed": frame_count,
+            "frames_inferred": inferred_frame_count,
             "total_frames": total_frames,
             "stopped_by_user": stopped_by_user,
             "output_path": output_path,
