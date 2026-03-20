@@ -21,12 +21,6 @@ from PyQt5.QtGui import (
 
 # Import LaneLineSuggestion từ road_zone module
 from lane_mapping.road_zone import LaneLineSuggestion
-from lane_mapping.bird_eye_view import (
-    BirdEyeViewTransformer, 
-    BirdEyeViewVisualizer,
-    IPMBirdEyeViewTransformer, 
-    IPMBirdEyeViewVisualizer
-)
 
 
 @dataclass
@@ -106,8 +100,9 @@ class ZoneCanvas(QLabel):
     def set_frame(self, frame: np.ndarray):
         """Đặt frame để hiển thị và khởi tạo lane detection"""
         self._original_frame = frame.copy()
-        
-        # Khởi tạo lane suggester và detect lanes
+        self._lane_suggester = None
+
+        # Khởi tạo lane suggester và detect lanes ngay để tránh giật khi tương tác.
         if self._enable_suggestion:
             self._lane_suggester = LaneLineSuggestion(
                 canny_low=50,
@@ -756,6 +751,13 @@ class ZoneSelectorWidget(QWidget):
             
             # === THỬ IPM TRƯỚC (như trong video.py) ===
             try:
+                from lane_mapping.bird_eye_view import (
+                    BirdEyeViewTransformer,
+                    BirdEyeViewVisualizer,
+                    IPMBirdEyeViewTransformer,
+                    IPMBirdEyeViewVisualizer,
+                )
+
                 ipm_transformer = IPMBirdEyeViewTransformer(
                     frame_width=w,
                     frame_height=h,
