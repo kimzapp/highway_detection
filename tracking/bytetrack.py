@@ -3,10 +3,6 @@ Object Tracking Pipeline với Supervision + YOLO
 Sử dụng thư viện Supervision của Roboflow để tracking
 """
 
-import cv2
-import numpy as np
-from typing import Optional
-
 import supervision as sv
 
 
