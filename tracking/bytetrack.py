@@ -8,7 +8,6 @@ import numpy as np
 from typing import Optional
 
 import supervision as sv
-from ultralytics import YOLO
 
 
 class ByteTracker:

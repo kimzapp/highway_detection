@@ -21,12 +21,6 @@ from PyQt5.QtGui import (
 
 # Import LaneLineSuggestion từ road_zone module
 from lane_mapping.road_zone import LaneLineSuggestion
-from lane_mapping.bird_eye_view import (
-    BirdEyeViewTransformer, 
-    BirdEyeViewVisualizer,
-    IPMBirdEyeViewTransformer, 
-    IPMBirdEyeViewVisualizer
-)
 
 
 @dataclass
@@ -73,6 +67,7 @@ class ZoneCanvas(QLabel):
         
         # Lane suggestion feature
         self._lane_suggester: Optional[LaneLineSuggestion] = None
+        self._lane_suggester_ready: bool = False
         self._current_suggestion: List[Tuple[int, int]] = []
         self._enable_suggestion: bool = True
         self._show_lane_detection: bool = False
@@ -106,8 +101,10 @@ class ZoneCanvas(QLabel):
     def set_frame(self, frame: np.ndarray):
         """Đặt frame để hiển thị và khởi tạo lane detection"""
         self._original_frame = frame.copy()
+        self._lane_suggester = None
+        self._lane_suggester_ready = False
         
-        # Khởi tạo lane suggester và detect lanes
+        # Chỉ khởi tạo object; việc detect lanes sẽ lazy-load khi cần gợi ý.
         if self._enable_suggestion:
             self._lane_suggester = LaneLineSuggestion(
                 canny_low=50,
@@ -117,9 +114,16 @@ class ZoneCanvas(QLabel):
                 max_line_gap=30,
                 suggestion_distance=30
             )
-            self._lane_suggester.detect_lanes(frame)
         
         self._update_display()
+
+    def _ensure_lane_suggester_ready(self):
+        """Chuẩn bị lane suggester theo nhu cầu để tránh chặn lúc mở màn hình."""
+        if self._lane_suggester_ready or self._lane_suggester is None or self._original_frame is None:
+            return
+
+        self._lane_suggester.detect_lanes(self._original_frame)
+        self._lane_suggester_ready = True
         
     def _update_display(self):
         """Cập nhật hiển thị"""
@@ -326,6 +330,8 @@ class ZoneCanvas(QLabel):
         if not self._enable_suggestion or self._lane_suggester is None:
             self._current_suggestion = []
             return
+
+        self._ensure_lane_suggester_ready()
         
         if len(self._current_points) >= 1:
             # Có điểm trước đó - gợi ý theo hướng đang vẽ
@@ -756,6 +762,13 @@ class ZoneSelectorWidget(QWidget):
             
             # === THỬ IPM TRƯỚC (như trong video.py) ===
             try:
+                from lane_mapping.bird_eye_view import (
+                    BirdEyeViewTransformer,
+                    BirdEyeViewVisualizer,
+                    IPMBirdEyeViewTransformer,
+                    IPMBirdEyeViewVisualizer,
+                )
+
                 ipm_transformer = IPMBirdEyeViewTransformer(
                     frame_width=w,
                     frame_height=h,
