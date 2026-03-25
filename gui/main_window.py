@@ -148,7 +148,7 @@ class ProcessingThread(QThread):
             
             # Initialize Violation Detector
             processor.violation_detector = ViolationDetector(
-                min_violation_frames=5,
+                min_violation_frames=processor.min_violation_frames,
                 min_normal_frames=3,
                 enabled_violations={ViolationType.WRONG_LANE}
             )
@@ -409,6 +409,7 @@ class ProcessingThread(QThread):
         args.max_age = pc.max_age
         args.trace_length = pc.trace_length
         args.skip_frames = pc.skip_frames
+        args.min_violation_frames = pc.min_violation_frames
         
         args.show_boxes = pc.show_boxes
         args.show_labels = pc.show_labels

@@ -91,7 +91,7 @@ class ViolationDetector:
     
     def __init__(
         self,
-        min_violation_frames: int = 5,
+        min_violation_frames: int = 45,
         min_normal_frames: int = 3,
         enabled_violations: Optional[Set[ViolationType]] = None
     ):
