@@ -310,7 +310,8 @@ class ProcessingThread(QThread):
                         detections=tracked_detections,
                         class_names=processor.model_names,
                         show_ids=True,
-                        show_labels=True
+                        show_labels=True,
+                        current_violations=processor._current_violations,
                     )
                     display_frame = create_combined_view(
                         camera_frame=annotated_frame,
