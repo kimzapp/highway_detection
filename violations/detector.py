@@ -4,7 +4,6 @@ Hệ thống phát hiện các loại vi phạm giao thông
 
 Hỗ trợ các loại vi phạm:
 - WRONG_LANE: Đi sai làn đường
-- WRONG_DIRECTION: Đi ngược chiều / đi lùi
 - ... (có thể mở rộng thêm)
 """
 
@@ -20,7 +19,6 @@ import supervision as sv
 class ViolationType(Enum):
     """Enum định nghĩa các loại vi phạm"""
     WRONG_LANE = auto()           # Đi sai làn đường / ngoài vùng cho phép
-    WRONG_DIRECTION = auto()      # Đi ngược chiều / đi lùi
     # Có thể mở rộng thêm các loại vi phạm khác:
     # SPEEDING = auto()           # Vượt quá tốc độ cho phép
     # ILLEGAL_OVERTAKE = auto()   # Vượt xe trái phép
@@ -84,22 +82,6 @@ class VehicleViolationState:
     last_position: Optional[Tuple[int, int]] = None
     last_bev_position: Optional[Tuple[int, int]] = None
     
-    # Lịch sử vị trí để tính hướng di chuyển (cho WRONG_DIRECTION)
-    position_history: List[Tuple[int, int]] = field(default_factory=list)
-    bev_position_history: List[Tuple[int, int]] = field(default_factory=list)
-    max_history_length: int = 15  # Số frame tối đa lưu trữ
-    
-    # Hướng di chuyển hiện tại (velocity vector normalized)
-    current_direction: Optional[Tuple[float, float]] = None
-    
-    # Zone ID mà xe đang ở (để so sánh với các xe cùng zone)
-    current_zone_id: Optional[int] = None
-    
-    # Số frame riêng cho vi phạm WRONG_DIRECTION
-    consecutive_wrong_direction_frames: int = 0
-    consecutive_normal_direction_frames: int = 0
-
-
 class ViolationDetector:
     """
     Bộ phát hiện vi phạm tổng hợp
@@ -109,7 +91,7 @@ class ViolationDetector:
     
     def __init__(
         self,
-        min_violation_frames: int = 5,
+        min_violation_frames: int = 45,
         min_normal_frames: int = 3,
         enabled_violations: Optional[Set[ViolationType]] = None
     ):
@@ -144,19 +126,6 @@ class ViolationDetector:
         # Frame hiện tại
         self._current_frame = 0
         
-        # === WRONG_DIRECTION detection parameters ===
-        # Số frame tối thiểu để xác định hướng đi
-        self.min_direction_frames: int = 5
-        # Ngưỡng cosine similarity để xác định ngược chiều (< threshold = ngược chiều)
-        # -1 = hoàn toàn ngược, 0 = vuông góc, 1 = cùng chiều
-        self.wrong_direction_threshold: float = -0.3  
-        # Ngưỡng di chuyển tối thiểu (pixels) để tính hướng (tránh noise khi đứng yên)
-        self.min_movement_threshold: float = 10.0
-        # Số xe tối thiểu cùng zone để so sánh hướng
-        self.min_vehicles_for_direction_check: int = 2
-        # Số frame riêng để xác nhận vi phạm WRONG_DIRECTION
-        self.min_wrong_direction_frames: int = 8
-    
     def set_valid_zones(self, zone_polygons: List[np.ndarray]):
         """
         Đặt các vùng hợp lệ cho xe di chuyển
@@ -248,186 +217,6 @@ class ViolationDetector:
         
         return None
     
-    def _get_vehicle_zone_id(self, position: Tuple[int, int]) -> Optional[int]:
-        """
-        Xác định xe đang ở zone nào
-        
-        Args:
-            position: Vị trí xe
-            
-        Returns:
-            Zone ID (index trong _valid_zone_polygons) hoặc None nếu không thuộc zone nào
-        """
-        if not self._valid_zone_polygons:
-            return None
-        
-        for zone_id, polygon in enumerate(self._valid_zone_polygons):
-            result = cv2.pointPolygonTest(polygon, (float(position[0]), float(position[1])), False)
-            if result >= 0:
-                return zone_id
-        
-        return None
-    
-    def _calculate_direction_vector(self, state: VehicleViolationState) -> Optional[Tuple[float, float]]:
-        """
-        Tính vector hướng di chuyển từ lịch sử vị trí
-        
-        Args:
-            state: Trạng thái xe có chứa position_history
-            
-        Returns:
-            Vector hướng normalized (dx, dy) hoặc None nếu không đủ dữ liệu
-        """
-        history = state.bev_position_history if state.bev_position_history else state.position_history
-        
-        if len(history) < self.min_direction_frames:
-            return None
-        
-        # Lấy các điểm đầu và cuối để tính hướng tổng thể
-        # Sử dụng nhiều điểm để giảm noise
-        recent_positions = history[-self.min_direction_frames:]
-        
-        # Tính trung bình vị trí đầu và cuối
-        start_positions = recent_positions[:len(recent_positions)//2]
-        end_positions = recent_positions[len(recent_positions)//2:]
-        
-        start_x = np.mean([p[0] for p in start_positions])
-        start_y = np.mean([p[1] for p in start_positions])
-        end_x = np.mean([p[0] for p in end_positions])
-        end_y = np.mean([p[1] for p in end_positions])
-        
-        dx = end_x - start_x
-        dy = end_y - start_y
-        
-        # Tính magnitude
-        magnitude = np.sqrt(dx**2 + dy**2)
-        
-        if magnitude < self.min_movement_threshold:
-            return None  # Xe đứng yên hoặc di chuyển quá ít
-        
-        # Normalize vector
-        return (dx / magnitude, dy / magnitude)
-    
-    def _get_zone_dominant_direction(self, zone_id: int, exclude_tracker_id: int) -> Optional[Tuple[float, float]]:
-        """
-        Tính hướng di chuyển chủ đạo của các xe trong một zone
-        
-        Args:
-            zone_id: ID của zone
-            exclude_tracker_id: ID xe cần loại trừ khỏi tính toán
-            
-        Returns:
-            Vector hướng chủ đạo normalized hoặc None
-        """
-        directions = []
-        
-        for tracker_id, state in self._vehicle_states.items():
-            if tracker_id == exclude_tracker_id:
-                continue
-            
-            if state.current_zone_id != zone_id:
-                continue
-            
-            if state.current_direction is not None:
-                directions.append(state.current_direction)
-        
-        if len(directions) < self.min_vehicles_for_direction_check - 1:
-            return None  # Không đủ xe để so sánh
-        
-        # Tính hướng trung bình
-        avg_dx = np.mean([d[0] for d in directions])
-        avg_dy = np.mean([d[1] for d in directions])
-        
-        magnitude = np.sqrt(avg_dx**2 + avg_dy**2)
-        if magnitude < 0.1:
-            return None  # Các xe đi nhiều hướng khác nhau
-        
-        return (avg_dx / magnitude, avg_dy / magnitude)
-    
-    def _check_wrong_direction(
-        self,
-        tracker_id: int,
-        position: Tuple[int, int],
-        bev_position: Tuple[int, int],
-        state: VehicleViolationState
-    ) -> Optional[ViolationType]:
-        """
-        Kiểm tra vi phạm đi ngược chiều hoặc đi lùi
-        
-        Phát hiện bằng cách so sánh hướng di chuyển của xe với 
-        hướng di chuyển chủ đạo của các xe khác trong cùng zone.
-        
-        Args:
-            tracker_id: ID của xe
-            position: Vị trí xe trên camera view
-            bev_position: Vị trí xe trên BEV
-            state: Trạng thái vi phạm của xe
-            
-        Returns:
-            ViolationType.WRONG_DIRECTION nếu vi phạm, None nếu không
-        """
-        if ViolationType.WRONG_DIRECTION not in self.enabled_violations:
-            return None
-        
-        # Cập nhật lịch sử vị trí
-        state.position_history.append(position)
-        if len(state.position_history) > state.max_history_length:
-            state.position_history.pop(0)
-        
-        if bev_position != (-1, -1):
-            state.bev_position_history.append(bev_position)
-            if len(state.bev_position_history) > state.max_history_length:
-                state.bev_position_history.pop(0)
-        
-        # Xác định zone của xe
-        state.current_zone_id = self._get_vehicle_zone_id(position)
-        
-        # Tính hướng di chuyển hiện tại của xe
-        current_direction = self._calculate_direction_vector(state)
-        state.current_direction = current_direction
-        
-        if current_direction is None:
-            # Không đủ dữ liệu để xác định hướng
-            state.consecutive_wrong_direction_frames = 0
-            state.consecutive_normal_direction_frames += 1
-            return None
-        
-        if state.current_zone_id is None:
-            # Xe không thuộc zone nào, không kiểm tra
-            return None
-        
-        # Lấy hướng chủ đạo của zone
-        dominant_direction = self._get_zone_dominant_direction(
-            state.current_zone_id, 
-            exclude_tracker_id=tracker_id
-        )
-        
-        if dominant_direction is None:
-            # Không đủ xe khác để so sánh
-            state.consecutive_wrong_direction_frames = 0
-            return None
-        
-        # Tính cosine similarity giữa hướng xe và hướng chủ đạo
-        # dot product của 2 vector đã normalize = cosine
-        cosine_similarity = (
-            current_direction[0] * dominant_direction[0] + 
-            current_direction[1] * dominant_direction[1]
-        )
-        
-        # Kiểm tra ngược chiều
-        if cosine_similarity < self.wrong_direction_threshold:
-            state.consecutive_wrong_direction_frames += 1
-            state.consecutive_normal_direction_frames = 0
-            
-            # Chỉ báo vi phạm sau đủ số frame
-            if state.consecutive_wrong_direction_frames >= self.min_wrong_direction_frames:
-                return ViolationType.WRONG_DIRECTION
-        else:
-            state.consecutive_wrong_direction_frames = 0
-            state.consecutive_normal_direction_frames += 1
-        
-        return None
-    
     def update(
         self,
         detections: sv.Detections,
@@ -499,12 +288,7 @@ class ViolationDetector:
             if wrong_lane:
                 detected_violations.append(wrong_lane)
             
-            # 2. Kiểm tra vi phạm đi ngược chiều / đi lùi
-            wrong_direction = self._check_wrong_direction(tracker_id, position, bev_position, state)
-            if wrong_direction:
-                detected_violations.append(wrong_direction)
-            
-            # 3. Có thể thêm các kiểm tra vi phạm khác ở đây:
+            # 2. Có thể thêm các kiểm tra vi phạm khác ở đây:
             # speeding = self._check_speeding(tracker_id, position, state)
             # if speeding:
             #     detected_violations.append(speeding)
@@ -630,14 +414,12 @@ class ViolationVisualizer:
     # Màu sắc cho từng loại vi phạm (BGR)
     VIOLATION_COLORS: Dict[ViolationType, Tuple[int, int, int]] = {
         ViolationType.WRONG_LANE: (0, 0, 255),         # Đỏ
-        ViolationType.WRONG_DIRECTION: (0, 165, 255),  # Cam (Orange)
         # Thêm màu cho các loại vi phạm khác khi cần
     }
     
     # Tên hiển thị cho từng loại vi phạm
     VIOLATION_NAMES: Dict[ViolationType, str] = {
         ViolationType.WRONG_LANE: "SAI LAN DUONG",
-        ViolationType.WRONG_DIRECTION: "DI NGUOC CHIEU",
         # Thêm tên cho các loại vi phạm khác khi cần
     }
     
@@ -820,7 +602,7 @@ class ViolationVisualizer:
         
         # Panel ở góc trên trái
         panel_width = 220
-        panel_height = 100  # Tăng chiều cao để hiển thị thêm loại vi phạm
+        panel_height = 80
         panel_x = 10
         panel_y = 50  # Dưới info text
         
@@ -858,11 +640,5 @@ class ViolationVisualizer:
         cv2.putText(frame, f"Tong sai lan: {wrong_lane_total}",
                    (panel_x + 10, panel_y + 68),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-        
-        # Total wrong direction violations
-        wrong_direction_total = total_violations.get(ViolationType.WRONG_DIRECTION, 0)
-        cv2.putText(frame, f"Tong nguoc chieu: {wrong_direction_total}",
-                   (panel_x + 10, panel_y + 88),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1)  # Màu cam
         
         return frame

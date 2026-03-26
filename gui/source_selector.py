@@ -18,6 +18,15 @@ from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# DEV-only flags: bật/tắt default local path nhanh trong quá trình phát triển.
+DEV_USE_LOCAL_DEFAULT_PATHS = os.environ.get("HD_DEV_LOCAL_DEFAULT_PATHS", "1") == "1"
+DEV_DEFAULT_VIDEO_PATH = os.environ.get(
+    "HD_DEV_DEFAULT_VIDEO_PATH",
+    r'E:\data_highway\highway_quality.mp4',
+)
+
+
 class SourceType(Enum):
     """Enum định nghĩa các loại nguồn đầu vào"""
     VIDEO = "video"
@@ -64,6 +73,23 @@ class SourceSelector(QWidget):
         self._setup_ui()
         self._connect_signals()
         self._set_default_output_path()
+        self._apply_dev_default_video_path()
+
+    def _apply_dev_default_video_path(self):
+        """Áp dụng video path mặc định cho môi trường dev nếu bật cờ."""
+        if not DEV_USE_LOCAL_DEFAULT_PATHS:
+            return
+
+        self._video_path_edit.setText(DEV_DEFAULT_VIDEO_PATH)
+        self._set_default_output_path(video_path=DEV_DEFAULT_VIDEO_PATH)
+
+        if os.path.isfile(DEV_DEFAULT_VIDEO_PATH):
+            self._update_video_info(DEV_DEFAULT_VIDEO_PATH)
+        else:
+            self._video_info_label.setText("⚠️ DEV default video path không tồn tại")
+            self._video_info_label.setStyleSheet("color: #ff9800; font-style: italic;")
+
+        self._validate_source()
         
     def _setup_ui(self):
         """Thiết lập giao diện"""

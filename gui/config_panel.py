@@ -18,6 +18,16 @@ from PyQt5.QtCore import pyqtSignal, Qt, QThread
 from PyQt5.QtGui import QFont
 
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# DEV-only flags: bật/tắt default local path nhanh trong quá trình phát triển.
+DEV_USE_LOCAL_DEFAULT_PATHS = os.environ.get("HD_DEV_LOCAL_DEFAULT_PATHS", "1") == "1"
+DEV_DEFAULT_MODEL_PATH = os.environ.get(
+    "HD_DEV_DEFAULT_MODEL_PATH",
+    os.path.join(_PROJECT_ROOT, "models", "weights", "best_lva.onnx"),
+)
+DEFAULT_MODEL_PATH = DEV_DEFAULT_MODEL_PATH if DEV_USE_LOCAL_DEFAULT_PATHS else "yolov8n.pt"
+
+
 # Danh sách các model Ultralytics được hỗ trợ tải tự động
 ULTRALYTICS_MODELS = [
     # YOLOv8 Detection
@@ -134,7 +144,7 @@ class ModelLoaderThread(QThread):
 class ProcessingConfig:
     """Cấu hình xử lý video"""
     # Model settings
-    model_path: str = "yolov8n.pt"
+    model_path: str = DEFAULT_MODEL_PATH
     device: str = "cpu"
     img_size: int = 640
     
@@ -146,7 +156,8 @@ class ProcessingConfig:
     # Tracker settings  
     max_age: int = 90
     trace_length: int = 25
-    skip_frames: int = 2
+    skip_frames: int = 1
+    min_violation_frames: int = 45
     
     # Visualization settings
     show_boxes: bool = True
@@ -176,6 +187,7 @@ class ProcessingConfig:
             'max_age': self.max_age,
             'trace_length': self.trace_length,
             'skip_frames': self.skip_frames,
+            'min_violation_frames': self.min_violation_frames,
             'show_boxes': self.show_boxes,
             'show_labels': self.show_labels,
             'show_traces': self.show_traces,
@@ -558,6 +570,16 @@ class ConfigPanel(QWidget):
         self._skip_frames_spin.setMinimumHeight(35)
         self._skip_frames_spin.setToolTip("Số frame bỏ qua trước khi chạy detect/track lại")
         tracker_layout.addWidget(self._skip_frames_spin, 2, 1)
+
+        tracker_layout.addWidget(QLabel("Xác nhận sai làn (frames):"), 3, 0)
+        self._min_violation_frames_spin = QSpinBox()
+        self._min_violation_frames_spin.setRange(1, 120)
+        self._min_violation_frames_spin.setValue(45)
+        self._min_violation_frames_spin.setMinimumHeight(35)
+        self._min_violation_frames_spin.setToolTip(
+            "Xe phải liên tiếp ở ngoài vùng hợp lệ đủ số frame này mới tính là vi phạm (mặc định 45 frame ~ 1.5s ở 30 FPS)"
+        )
+        tracker_layout.addWidget(self._min_violation_frames_spin, 3, 1)
         
         tracker_layout.setColumnStretch(2, 1)
         
@@ -568,7 +590,8 @@ class ConfigPanel(QWidget):
             "💡 <b>Gợi ý:</b><br>"
             "• <b>Max Age</b>: Tăng nếu xe bị che khuất lâu<br>"
             "• <b>Trace Length</b>: Tăng để thấy quỹ đạo dài hơn<br>"
-            "• <b>Skip Frames</b>: 2-3 giúp tăng FPS đáng kể"
+            "• <b>Skip Frames</b>: 2-3 giúp tăng FPS đáng kể<br>"
+            "• <b>Xác nhận sai làn</b>: Tăng để giảm false positive"
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("""
@@ -874,6 +897,7 @@ class ConfigPanel(QWidget):
         self._max_age_spin.setValue(self._config.max_age)
         self._trace_length_spin.setValue(self._config.trace_length)
         self._skip_frames_spin.setValue(self._config.skip_frames)
+        self._min_violation_frames_spin.setValue(self._config.min_violation_frames)
         
         # Visualization
         self._show_boxes_check.setChecked(self._config.show_boxes)
@@ -892,7 +916,7 @@ class ConfigPanel(QWidget):
             
     def _save_ui_to_config(self):
         """Lưu UI vào config"""
-        self._config.model_path = self._model_path_edit.text().strip() or "yolov8n.pt"
+        self._config.model_path = self._model_path_edit.text().strip() or DEFAULT_MODEL_PATH
         self._config.device = self._device_combo.currentData() or "cpu"
         self._config.img_size = self._img_size_combo.currentData() or 640
         
@@ -907,6 +931,7 @@ class ConfigPanel(QWidget):
         self._config.max_age = self._max_age_spin.value()
         self._config.trace_length = self._trace_length_spin.value()
         self._config.skip_frames = self._skip_frames_spin.value()
+        self._config.min_violation_frames = self._min_violation_frames_spin.value()
         
         self._config.show_boxes = self._show_boxes_check.isChecked()
         self._config.show_labels = self._show_labels_check.isChecked()
