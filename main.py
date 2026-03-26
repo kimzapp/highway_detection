@@ -65,6 +65,8 @@ def parse_args():
                         help="Skip BEV update every N frames (0=no skip, higher=faster but less smooth)")
     parser.add_argument("--skip-frames", type=int, default=2,
                         help="Skip detection/tracking every N frames (2 => process 1 frame then skip 2)")
+    parser.add_argument("--min-violation-frames", type=int, default=45,
+                        help="Minimum consecutive frames outside valid zone before counting wrong-lane violation")
     
     return parser.parse_args()
 

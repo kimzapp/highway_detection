@@ -203,6 +203,7 @@ class VideoProcessor:
         self.use_half = getattr(args, 'half', True)  # Use FP16 for GPU
         self.skip_frames = max(0, int(getattr(args, 'skip_frames', 2)))  # Process every N+1 frames
         self.skip_bev_frames = getattr(args, 'skip_bev_frames', 0)  # Skip BEV every N frames
+        self.min_violation_frames = max(1, int(getattr(args, 'min_violation_frames', 45)))
         
         # Tracker sẽ được khởi tạo khi biết fps
         self.tracker: Optional[ByteTracker] = None
@@ -544,7 +545,7 @@ class VideoProcessor:
             
             # Initialize Violation Detector with valid zones
             self.violation_detector = ViolationDetector(
-                min_violation_frames=5,
+                min_violation_frames=self.min_violation_frames,
                 min_normal_frames=3,
                 enabled_violations={ViolationType.WRONG_LANE}
             )
@@ -606,7 +607,7 @@ class VideoProcessor:
                 
                 # Initialize Violation Detector with valid zones
                 self.violation_detector = ViolationDetector(
-                    min_violation_frames=5,
+                    min_violation_frames=self.min_violation_frames,
                     min_normal_frames=3,
                     enabled_violations={ViolationType.WRONG_LANE}
                 )
