@@ -119,6 +119,7 @@ class ViolationDetector:
         # Valid zone polygon cho WrongLane detection
         self._valid_zone_polygon: Optional[np.ndarray] = None
         self._valid_zone_polygons: List[np.ndarray] = []  # Hỗ trợ nhiều zone
+        self._bev_valid_zone_polygons: List[np.ndarray] = []
         
         # BEV transformer reference (để transform điểm)
         self._bev_transformer = None
@@ -138,6 +139,10 @@ class ViolationDetector:
             # Tạo combined polygon từ tất cả các zone (union)
             all_points = np.vstack(zone_polygons)
             self._valid_zone_polygon = cv2.convexHull(all_points)
+        else:
+            self._valid_zone_polygon = None
+
+        self._rebuild_bev_valid_zones()
     
     def set_bev_transformer(self, transformer):
         """
@@ -147,6 +152,57 @@ class ViolationDetector:
             transformer: BEV transformer instance
         """
         self._bev_transformer = transformer
+        self._rebuild_bev_valid_zones()
+
+    def _rebuild_bev_valid_zones(self):
+        """Rebuild valid-zone polygons in BEV coordinates from camera-zone polygons."""
+        self._bev_valid_zone_polygons = []
+
+        if self._bev_transformer is None or not self._valid_zone_polygons:
+            return
+
+        for polygon in self._valid_zone_polygons:
+            if polygon is None or len(polygon) < 3:
+                continue
+
+            bev_points = []
+            points = np.asarray(polygon).reshape(-1, 2)
+            for pt in points:
+                try:
+                    bev_pt = self._bev_transformer.transform_point((int(pt[0]), int(pt[1])))
+                except Exception:
+                    continue
+
+                if bev_pt is None or len(bev_pt) != 2:
+                    continue
+
+                bx, by = int(bev_pt[0]), int(bev_pt[1])
+                if (bx, by) == (-1, -1):
+                    continue
+
+                # Đồng bộ cách xử lý với BEV visualizer: clamp điểm zone vào biên BEV.
+                bev_width = int(getattr(self._bev_transformer, "bev_width", 0))
+                bev_height = int(getattr(self._bev_transformer, "bev_height", 0))
+                if bev_width > 0 and bev_height > 0:
+                    bx = max(0, min(bev_width - 1, bx))
+                    by = max(0, min(bev_height - 1, by))
+
+                bev_points.append((bx, by))
+
+            if len(bev_points) >= 3:
+                self._bev_valid_zone_polygons.append(np.array(bev_points, dtype=np.int32))
+
+    def is_bev_point_in_valid_zone(self, point: Tuple[int, int]) -> bool:
+        """Check whether a BEV point is inside any configured valid zone."""
+        if not self._bev_valid_zone_polygons:
+            return True
+
+        for polygon in self._bev_valid_zone_polygons:
+            result = cv2.pointPolygonTest(polygon, (float(point[0]), float(point[1])), False)
+            if result >= 0:
+                return True
+
+        return False
     
     def enable_violation(self, violation_type: ViolationType):
         """Bật phát hiện một loại vi phạm"""
@@ -186,11 +242,60 @@ class ViolationDetector:
         x1, y1, x2, y2 = box
         center_bottom = (int((x1 + x2) / 2), int(y2))
         return center_bottom
+
+    def _get_vehicle_contact_points(self, box: np.ndarray) -> List[Tuple[int, int]]:
+        """Lấy các điểm tiếp xúc đáy xe để giảm bỏ sót khi chỉ dùng 1 điểm giữa."""
+        x1, y1, x2, y2 = box
+        left = (int(x1), int(y2))
+        center = (int((x1 + x2) / 2), int(y2))
+        right = (int(x2), int(y2))
+        return [left, center, right]
+
+    def _is_wrong_lane_by_camera(self, box: np.ndarray) -> Optional[bool]:
+        """Đánh giá sai làn trên camera view bằng đa điểm đáy bbox."""
+        if not self._valid_zone_polygons:
+            return None
+
+        points = self._get_vehicle_contact_points(box)
+        outside = sum(0 if self.is_point_in_valid_zone(pt) else 1 for pt in points)
+        return outside >= 2
+
+    def _is_wrong_lane_by_bev(self, box: np.ndarray) -> Optional[bool]:
+        """Đánh giá sai làn trên BEV bằng đa điểm và majority vote."""
+        if self._bev_transformer is None or not self._bev_valid_zone_polygons:
+            return None
+
+        outside = 0
+        valid_samples = 0
+
+        for pt in self._get_vehicle_contact_points(box):
+            try:
+                bev_pt = self._bev_transformer.transform_point(pt)
+            except Exception:
+                continue
+
+            if bev_pt is None or len(bev_pt) != 2:
+                continue
+
+            bx, by = int(bev_pt[0]), int(bev_pt[1])
+            if bx < 0 or by < 0:
+                continue
+
+            valid_samples += 1
+            if not self.is_bev_point_in_valid_zone((bx, by)):
+                outside += 1
+
+        if valid_samples == 0:
+            return None
+
+        return outside >= 2
     
     def _check_wrong_lane(
         self,
         tracker_id: int,
+        box: np.ndarray,
         position: Tuple[int, int],
+        bev_position: Tuple[int, int],
         state: VehicleViolationState
     ) -> Optional[ViolationType]:
         """
@@ -199,6 +304,7 @@ class ViolationDetector:
         Args:
             tracker_id: ID của xe
             position: Vị trí xe trên camera view
+            bev_position: Vị trí xe trên BEV
             state: Trạng thái vi phạm của xe
             
         Returns:
@@ -206,13 +312,14 @@ class ViolationDetector:
         """
         if ViolationType.WRONG_LANE not in self.enabled_violations:
             return None
-        
-        if not self._valid_zone_polygons:
-            return None  # Không có zone được định nghĩa
-        
-        is_in_valid_zone = self.is_point_in_valid_zone(position)
-        
-        if not is_in_valid_zone:
+
+        # Ưu tiên quyết định theo BEV để khớp trực quan, fallback camera khi BEV không sẵn sàng.
+        bev_wrong_lane = self._is_wrong_lane_by_bev(box)
+        camera_wrong_lane = self._is_wrong_lane_by_camera(box)
+
+        is_wrong_lane = bev_wrong_lane if bev_wrong_lane is not None else camera_wrong_lane
+
+        if is_wrong_lane:
             return ViolationType.WRONG_LANE
         
         return None
@@ -284,7 +391,7 @@ class ViolationDetector:
             detected_violations = []
             
             # 1. Kiểm tra vi phạm sai làn
-            wrong_lane = self._check_wrong_lane(tracker_id, position, state)
+            wrong_lane = self._check_wrong_lane(tracker_id, box, position, bev_position, state)
             if wrong_lane:
                 detected_violations.append(wrong_lane)
             

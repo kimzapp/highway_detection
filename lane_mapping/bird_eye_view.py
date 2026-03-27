@@ -660,8 +660,12 @@ class BirdEyeViewVisualizer:
             # Lấy màu
             color = self.get_vehicle_color(class_id, tracker_id)
             
-            # Kiểm tra xe có nằm trong vùng valid hay không
-            is_valid = self.is_in_valid_zone(bev_point)
+            # Nếu có current_violations từ detector thì ưu tiên dùng để đồng bộ với camera view.
+            if current_violations is not None and tracker_id is not None:
+                violations = current_violations.get(tracker_id, [])
+                is_valid = len(violations) == 0
+            else:
+                is_valid = self.is_in_valid_zone(bev_point)
             
             # Đếm số xe
             if is_valid:
@@ -1957,8 +1961,12 @@ class IPMBirdEyeViewVisualizer:
             
             color = self.get_vehicle_color(class_id, tracker_id)
             
-            # Kiểm tra xe có nằm trong vùng valid hay không
-            is_valid = self.is_in_valid_zone(bev_point)
+            # Nếu có current_violations từ detector thì ưu tiên dùng để đồng bộ với camera view.
+            if current_violations is not None and tracker_id is not None:
+                violations = current_violations.get(tracker_id, [])
+                is_valid = len(violations) == 0
+            else:
+                is_valid = self.is_in_valid_zone(bev_point)
             
             # Đếm số xe
             if is_valid:
