@@ -849,7 +849,7 @@ class VideoProcessor:
                             detections=tracked_detections,
                             class_names=self.model_names,
                             show_ids=True,
-                            show_labels=True
+                            show_labels=True,
                         )
                         self._last_bev_frame = bev_frame
                     else:

@@ -193,6 +193,24 @@ class BirdEyeViewTransformer:
         transformed = cv2.perspectiveTransform(pt, self.inverse_matrix)
         return (int(transformed[0][0][0]), int(transformed[0][0][1]))
 
+    def transform_frame(
+        self,
+        frame: np.ndarray,
+        interpolation: int = cv2.INTER_LINEAR,
+    ) -> Optional[np.ndarray]:
+        """Chuyển toàn bộ frame từ camera view sang BEV bằng homography."""
+        if frame is None:
+            return None
+
+        return cv2.warpPerspective(
+            frame,
+            self.transform_matrix,
+            (self.bev_width, self.bev_height),
+            flags=interpolation,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+
 
 class BirdEyeViewVisualizer:
     """
@@ -256,7 +274,7 @@ class BirdEyeViewVisualizer:
         self._create_base_image()
     
     def _create_base_image(self):
-        """Tạo ảnh nền BEV với làn đường căn giữa và vùng valid/invalid"""
+        """Tạo ảnh nền BEV tĩnh dùng khi không có camera frame đầu vào."""
         self.base_image = np.full(
             (self.transformer.bev_height, self.transformer.bev_width, 3),
             self.bg_color,
@@ -264,62 +282,77 @@ class BirdEyeViewVisualizer:
         )
         
         lane_pts = self.transformer.dest_points.astype(np.int32)
-        
-        if self.show_zones:
-            # Vẽ vùng Invalid Zone (toàn bộ nền) - màu đỏ
-            invalid_overlay = np.full_like(self.base_image, self.invalid_zone_color, dtype=np.uint8)
-            
-            # Vẽ vùng Valid Zone (làn đường) - màu xanh lá
-            valid_overlay = np.zeros_like(self.base_image, dtype=np.uint8)
-            cv2.fillPoly(valid_overlay, [lane_pts], self.valid_zone_color)
-            
-            # Tạo mask cho valid zone
-            valid_mask = np.zeros((self.transformer.bev_height, self.transformer.bev_width), dtype=np.uint8)
-            cv2.fillPoly(valid_mask, [lane_pts], 255)
-            
-            # Blend các zone lên base image
-            # Vùng invalid (ngoài làn đường)
-            invalid_mask = cv2.bitwise_not(valid_mask)
-            self.base_image = cv2.addWeighted(
-                self.base_image, 1 - self.zone_alpha,
-                invalid_overlay, self.zone_alpha,
-                0
-            )
-            
-            # Vùng valid (trong làn đường)
-            valid_region = cv2.bitwise_and(valid_overlay, valid_overlay, mask=valid_mask)
-            base_valid_region = cv2.bitwise_and(self.base_image, self.base_image, mask=valid_mask)
-            base_invalid_region = cv2.bitwise_and(self.base_image, self.base_image, mask=invalid_mask)
-            
-            # Blend valid zone riêng
-            blended_valid = cv2.addWeighted(
-                base_valid_region, 0.4,
-                valid_region, 0.6,
-                0
-            )
-            
-            # Kết hợp lại
-            self.base_image = cv2.add(base_invalid_region, blended_valid)
-            
-            # Vẽ viền làn đường (đường phân cách valid/invalid)
-            cv2.polylines(self.base_image, [lane_pts], True, (255, 255, 255), 2)
-            
-            # Thêm label cho các zone
-            self._draw_zone_labels()
-        else:
-            # Vẽ làn đường thông thường (không có zone colors)
-            cv2.fillPoly(self.base_image, [lane_pts], self.lane_color)
-            cv2.polylines(self.base_image, [lane_pts], True, self.lane_border_color, 2)
-        
-        # Thêm label căn giữa ở phía trên
+        cv2.fillPoly(self.base_image, [lane_pts], self.lane_color)
+        cv2.polylines(self.base_image, [lane_pts], True, self.lane_border_color, 2)
+
+        self._draw_header(self.base_image)
+
+    def _draw_header(self, bev_image: np.ndarray):
+        """Vẽ tiêu đề BEV lên ảnh đích."""
         label = "Bird's Eye View"
         (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
         text_x = (self.transformer.bev_width - text_w) // 2
-        cv2.putText(self.base_image, label, (text_x, 25),
+        cv2.putText(bev_image, label, (text_x, 25),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+    def _overlay_zones(self, bev_image: np.ndarray):
+        """Vẽ vùng valid/invalid lên ảnh BEV hiện tại (sau khi warp frame)."""
+        if not self.show_zones:
+            return
+
+        lane_pts = self.transformer.dest_points.astype(np.int32)
+
+        invalid_overlay = np.full_like(bev_image, self.invalid_zone_color, dtype=np.uint8)
+        valid_overlay = np.zeros_like(bev_image, dtype=np.uint8)
+        cv2.fillPoly(valid_overlay, [lane_pts], self.valid_zone_color)
+
+        valid_mask = np.zeros((self.transformer.bev_height, self.transformer.bev_width), dtype=np.uint8)
+        cv2.fillPoly(valid_mask, [lane_pts], 255)
+        invalid_mask = cv2.bitwise_not(valid_mask)
+
+        bev_image[:] = cv2.addWeighted(
+            bev_image, 1 - self.zone_alpha,
+            invalid_overlay, self.zone_alpha,
+            0
+        )
+
+        valid_region = cv2.bitwise_and(valid_overlay, valid_overlay, mask=valid_mask)
+        base_valid_region = cv2.bitwise_and(bev_image, bev_image, mask=valid_mask)
+        base_invalid_region = cv2.bitwise_and(bev_image, bev_image, mask=invalid_mask)
+
+        blended_valid = cv2.addWeighted(
+            base_valid_region, 0.4,
+            valid_region, 0.6,
+            0
+        )
+
+        bev_image[:] = cv2.add(base_invalid_region, blended_valid)
+        cv2.polylines(bev_image, [lane_pts], True, (255, 255, 255), 2)
+        self._draw_zone_labels(bev_image)
+
+    def _render_bev_background(self, camera_frame: Optional[np.ndarray]) -> np.ndarray:
+        """Tạo nền BEV: ưu tiên warp toàn frame, fallback về ảnh nền tĩnh."""
+        if camera_frame is None:
+            return self.base_image.copy()
+
+        try:
+            transformed = self.transformer.transform_frame(camera_frame)
+        except Exception:
+            transformed = None
+
+        if transformed is None:
+            return self.base_image.copy()
+
+        if transformed.shape[0] != self.transformer.bev_height or transformed.shape[1] != self.transformer.bev_width:
+            transformed = cv2.resize(transformed, (self.transformer.bev_width, self.transformer.bev_height))
+
+        self._draw_header(transformed)
+        return transformed
     
-    def _draw_zone_labels(self):
+    def _draw_zone_labels(self, target_image: Optional[np.ndarray] = None):
         """Vẽ nhãn cho các vùng valid/invalid"""
+        draw_target = target_image if target_image is not None else self.base_image
+
         # Label "VALID ZONE" ở giữa làn đường
         valid_label = "VALID ZONE"
         (vl_w, vl_h), _ = cv2.getTextSize(valid_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
@@ -329,15 +362,15 @@ class BirdEyeViewVisualizer:
         lane_center_y = int((self.transformer.margin + self.transformer.bev_height - self.transformer.margin) / 2)
         
         # Vẽ text với background
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (lane_center_x - vl_w // 2 - 8, lane_center_y - vl_h // 2 - 8),
                      (lane_center_x + vl_w // 2 + 8, lane_center_y + vl_h // 2 + 8),
                      (0, 150, 0), -1)
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (lane_center_x - vl_w // 2 - 8, lane_center_y - vl_h // 2 - 8),
                      (lane_center_x + vl_w // 2 + 8, lane_center_y + vl_h // 2 + 8),
                      (255, 255, 255), 1)
-        cv2.putText(self.base_image, valid_label,
+        cv2.putText(draw_target, valid_label,
                    (lane_center_x - vl_w // 2, lane_center_y + vl_h // 2),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
@@ -347,29 +380,29 @@ class BirdEyeViewVisualizer:
         left_x = self.transformer.margin // 2
         left_y = self.transformer.bev_height // 2
         
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (left_x - il_w // 2 - 5, left_y - il_h // 2 - 5),
                      (left_x + il_w // 2 + 5, left_y + il_h // 2 + 5),
                      (0, 0, 180), -1)
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (left_x - il_w // 2 - 5, left_y - il_h // 2 - 5),
                      (left_x + il_w // 2 + 5, left_y + il_h // 2 + 5),
                      (255, 255, 255), 1)
-        cv2.putText(self.base_image, invalid_label,
+        cv2.putText(draw_target, invalid_label,
                    (left_x - il_w // 2, left_y + il_h // 2),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
         # Label "INVALID ZONE" ở bên phải
         right_x = self.transformer.bev_width - self.transformer.margin // 2
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (right_x - il_w // 2 - 5, left_y - il_h // 2 - 5),
                      (right_x + il_w // 2 + 5, left_y + il_h // 2 + 5),
                      (0, 0, 180), -1)
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (right_x - il_w // 2 - 5, left_y - il_h // 2 - 5),
                      (right_x + il_w // 2 + 5, left_y + il_h // 2 + 5),
                      (255, 255, 255), 1)
-        cv2.putText(self.base_image, invalid_label,
+        cv2.putText(draw_target, invalid_label,
                    (right_x - il_w // 2, left_y + il_h // 2),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
     
@@ -572,7 +605,7 @@ class BirdEyeViewVisualizer:
         class_names: Optional[dict] = None,
         show_ids: bool = True,
         show_labels: bool = True,
-        show_zone_stats: bool = True
+        show_zone_stats: bool = True,
     ) -> np.ndarray:
         """
         Vẽ BEV với các xe từ detections
@@ -588,6 +621,7 @@ class BirdEyeViewVisualizer:
             BEV image với các xe được vẽ
         """
         bev_image = self.base_image.copy()
+        self._overlay_zones(bev_image)
         
         if detections is None or len(detections) == 0:
             return bev_image
@@ -1014,6 +1048,10 @@ class IPMBirdEyeViewTransformer:
         # BEV center offset (camera position trong BEV)
         self.bev_center_x = self.bev_width / 2
         self.bev_origin_y = self.bev_height - 50  # Vị trí camera trong BEV
+
+        # Invalidate full-frame mapping cache khi tham số đổi.
+        self._bev_map_x = None
+        self._bev_map_y = None
     
     def calibrate_from_frame(self, frame: np.ndarray) -> bool:
         """
@@ -1167,6 +1205,56 @@ class IPMBirdEyeViewTransformer:
             'vanishing_point': self._vanishing_point,
             'is_calibrated': self._is_calibrated
         }
+
+    def _build_bev_image_map(self):
+        """Tiền tính map BEV->image để remap full-frame nhanh hơn mỗi frame."""
+        h, w = self.bev_height, self.bev_width
+
+        bev_x, bev_y = np.meshgrid(
+            np.arange(w, dtype=np.float32),
+            np.arange(h, dtype=np.float32),
+        )
+
+        X = (bev_x - self.bev_center_x) / self.bev_scale
+        Y = (self.bev_origin_y - bev_y) / self.bev_scale
+
+        map_x = np.full((h, w), -1.0, dtype=np.float32)
+        map_y = np.full((h, w), -1.0, dtype=np.float32)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            valid = Y > 0.01
+            u = self.cx + (self.focal_length * X / Y)
+            theta = np.arctan(self.camera_height / Y)
+            alpha = theta - self.pitch_angle
+            v = self.cy + self.focal_length * np.tan(alpha)
+
+            finite = np.isfinite(u) & np.isfinite(v) & valid
+            map_x[finite] = u[finite]
+            map_y[finite] = v[finite]
+
+        self._bev_map_x = map_x
+        self._bev_map_y = map_y
+
+    def transform_frame(
+        self,
+        frame: np.ndarray,
+        interpolation: int = cv2.INTER_LINEAR,
+    ) -> Optional[np.ndarray]:
+        """Chuyển toàn bộ frame từ image space sang BEV bằng IPM."""
+        if frame is None:
+            return None
+
+        if self._bev_map_x is None or self._bev_map_y is None:
+            self._build_bev_image_map()
+
+        return cv2.remap(
+            frame,
+            self._bev_map_x,
+            self._bev_map_y,
+            interpolation=interpolation,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
     
     def draw_calibration_overlay(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -1461,18 +1549,19 @@ class IPMBirdEyeViewVisualizer:
         return "valid" if self.is_in_valid_zone(bev_point) else "invalid"
     
     def _create_base_image(self):
-        """Tạo ảnh nền BEV với grid, markers và valid/invalid zones"""
+        """Tạo ảnh nền tĩnh BEV với grid/markers khi không có camera frame."""
         w, h = self.transformer.bev_width, self.transformer.bev_height
         self.base_image = np.full((h, w, 3), self.bg_color, dtype=np.uint8)
-        
+
+        self._draw_static_overlay(self.base_image)
+
+    def _draw_static_overlay(self, target_image: np.ndarray):
+        """Vẽ grid, marker, camera marker và header lên ảnh đích."""
+        w, h = self.transformer.bev_width, self.transformer.bev_height
         center_x = self.transformer.bev_center_x
         origin_y = self.transformer.bev_origin_y
         scale = self.transformer.bev_scale
-        
-        # Vẽ valid/invalid zones trước grid
-        if self.show_zones and self.bev_valid_zone_polygons:
-            self._draw_zones()
-        
+
         if self.show_grid:
             # Vẽ grid dọc (mỗi 1 meter)
             for x_offset in range(-10, 11):
@@ -1480,42 +1569,58 @@ class IPMBirdEyeViewVisualizer:
                 if 0 <= x < w:
                     color = self.grid_color if x_offset != 0 else (70, 70, 75)
                     thickness = 1 if x_offset != 0 else 2
-                    cv2.line(self.base_image, (x, 0), (x, h), color, thickness)
+                    cv2.line(target_image, (x, 0), (x, h), color, thickness)
             
             # Vẽ grid ngang (mỗi 5 meters)
             for distance in range(0, 60, 5):
                 y = int(origin_y - distance * scale)
                 if 0 <= y < h:
-                    cv2.line(self.base_image, (0, y), (w, y), self.grid_color, 1)
+                    cv2.line(target_image, (0, y), (w, y), self.grid_color, 1)
         
         if self.show_distance_markers:
             # Markers khoảng cách
             for distance in [5, 10, 20, 30, 40, 50]:
                 y = int(origin_y - distance * scale)
                 if 10 < y < h - 10:
-                    cv2.putText(self.base_image, f"{distance}m", (5, y + 4),
+                    cv2.putText(target_image, f"{distance}m", (5, y + 4),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (120, 120, 125), 1)
         
         # Vẽ vị trí camera
         cam_y = int(origin_y)
-        cv2.circle(self.base_image, (int(center_x), cam_y), 5, (100, 200, 255), -1)
-        cv2.putText(self.base_image, "CAM", (int(center_x) - 15, cam_y + 20),
+        cv2.circle(target_image, (int(center_x), cam_y), 5, (100, 200, 255), -1)
+        cv2.putText(target_image, "CAM", (int(center_x) - 15, cam_y + 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 200, 255), 1)
         
         # Header
         header = "IPM Bird's Eye View"
         (tw, th), _ = cv2.getTextSize(header, cv2.FONT_HERSHEY_DUPLEX, 0.5, 1)
-        cv2.putText(self.base_image, header, ((w - tw) // 2, 20),
+        cv2.putText(target_image, header, ((w - tw) // 2, 20),
                    cv2.FONT_HERSHEY_DUPLEX, 0.5, (180, 180, 185), 1)
-        
-        # Vẽ zone labels nếu có zones
-        if self.show_zones and self.bev_valid_zone_polygons:
-            self._draw_zone_labels()
+
+    def _render_bev_background(self, camera_frame: Optional[np.ndarray]) -> np.ndarray:
+        """Tạo nền BEV: ưu tiên transform full-frame, fallback về nền tĩnh."""
+        if camera_frame is None:
+            return self.base_image.copy()
+
+        try:
+            transformed = self.transformer.transform_frame(camera_frame)
+        except Exception:
+            transformed = None
+
+        if transformed is None:
+            return self.base_image.copy()
+
+        if transformed.shape[0] != self.transformer.bev_height or transformed.shape[1] != self.transformer.bev_width:
+            transformed = cv2.resize(transformed, (self.transformer.bev_width, self.transformer.bev_height))
+
+        self._draw_static_overlay(transformed)
+        return transformed
     
-    def _draw_zones(self):
+    def _draw_zones(self, target_image: Optional[np.ndarray] = None):
         """
         Vẽ tất cả các vùng valid (mỗi zone 1 màu) và invalid (đỏ) lên base image
         """
+        draw_target = target_image if target_image is not None else self.base_image
         w, h = self.transformer.bev_width, self.transformer.bev_height
         
         # Tạo combined mask cho tất cả valid zones
@@ -1527,12 +1632,12 @@ class IPMBirdEyeViewVisualizer:
         invalid_mask = cv2.bitwise_not(combined_valid_mask)
         
         # Tạo overlay cho invalid zone (toàn bộ nền) - màu đỏ
-        invalid_overlay = np.full_like(self.base_image, self.invalid_zone_color, dtype=np.uint8)
+        invalid_overlay = np.full_like(draw_target, self.invalid_zone_color, dtype=np.uint8)
         
         # Blend invalid zone (vùng ngoài tất cả làn đường)
         invalid_region = cv2.bitwise_and(invalid_overlay, invalid_overlay, mask=invalid_mask)
-        self.base_image = cv2.addWeighted(
-            self.base_image, 1 - self.zone_alpha,
+        draw_target[:] = cv2.addWeighted(
+            draw_target, 1 - self.zone_alpha,
             invalid_region, self.zone_alpha,
             0
         )
@@ -1549,26 +1654,27 @@ class IPMBirdEyeViewVisualizer:
             cv2.fillPoly(zone_mask, [bev_polygon], 255)
             
             # Tạo overlay cho zone này
-            valid_overlay = np.zeros_like(self.base_image, dtype=np.uint8)
+            valid_overlay = np.zeros_like(draw_target, dtype=np.uint8)
             cv2.fillPoly(valid_overlay, [bev_polygon], zone_color)
             
             # Blend valid zone
             valid_region = cv2.bitwise_and(valid_overlay, valid_overlay, mask=zone_mask)
-            base_valid = cv2.bitwise_and(self.base_image, self.base_image, mask=zone_mask)
+            base_valid = cv2.bitwise_and(draw_target, draw_target, mask=zone_mask)
             blended_valid = cv2.addWeighted(base_valid, 0.4, valid_region, 0.6, 0)
             
             # Combine: giữ phần ngoài zone và thêm phần valid đã blend
             inv_zone_mask = cv2.bitwise_not(zone_mask)
-            self.base_image = cv2.bitwise_and(self.base_image, self.base_image, mask=inv_zone_mask)
-            self.base_image = cv2.add(self.base_image, blended_valid)
+            draw_target[:] = cv2.bitwise_and(draw_target, draw_target, mask=inv_zone_mask)
+            draw_target[:] = cv2.add(draw_target, blended_valid)
             
             # Vẽ viền phân cách giữa valid và invalid zone
-            cv2.polylines(self.base_image, [bev_polygon], True, (255, 255, 255), 2)
+            cv2.polylines(draw_target, [bev_polygon], True, (255, 255, 255), 2)
     
-    def _draw_zone_labels(self):
+    def _draw_zone_labels(self, target_image: Optional[np.ndarray] = None):
         """
         Vẽ nhãn cho các vùng valid (từng zone) và invalid
         """
+        draw_target = target_image if target_image is not None else self.base_image
         w, h = self.transformer.bev_width, self.transformer.bev_height
         
         # Vẽ label cho từng valid zone
@@ -1591,15 +1697,15 @@ class IPMBirdEyeViewVisualizer:
             zone_label = f"Zone {i + 1}" if len(self.bev_valid_zone_polygons) > 1 else "VALID"
             (vl_w, vl_h), _ = cv2.getTextSize(zone_label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
             
-            cv2.rectangle(self.base_image,
+            cv2.rectangle(draw_target,
                          (cx - vl_w // 2 - 4, cy - vl_h // 2 - 4),
                          (cx + vl_w // 2 + 4, cy + vl_h // 2 + 4),
                          zone_color, -1)
-            cv2.rectangle(self.base_image,
+            cv2.rectangle(draw_target,
                          (cx - vl_w // 2 - 4, cy - vl_h // 2 - 4),
                          (cx + vl_w // 2 + 4, cy + vl_h // 2 + 4),
                          (255, 255, 255), 1)
-            cv2.putText(self.base_image, zone_label,
+            cv2.putText(draw_target, zone_label,
                        (cx - vl_w // 2, cy + vl_h // 2),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
@@ -1609,31 +1715,39 @@ class IPMBirdEyeViewVisualizer:
         left_x = 25
         left_y = h // 2
         
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (left_x - il_w // 2 - 3, left_y - il_h // 2 - 3),
                      (left_x + il_w // 2 + 3, left_y + il_h // 2 + 3),
                      (0, 0, 150), -1)
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (left_x - il_w // 2 - 3, left_y - il_h // 2 - 3),
                      (left_x + il_w // 2 + 3, left_y + il_h // 2 + 3),
                      (255, 255, 255), 1)
-        cv2.putText(self.base_image, invalid_label,
+        cv2.putText(draw_target, invalid_label,
                    (left_x - il_w // 2, left_y + il_h // 2),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
         
         # Label "INVALID" ở bên phải
         right_x = w - 25
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (right_x - il_w // 2 - 3, left_y - il_h // 2 - 3),
                      (right_x + il_w // 2 + 3, left_y + il_h // 2 + 3),
                      (0, 0, 150), -1)
-        cv2.rectangle(self.base_image,
+        cv2.rectangle(draw_target,
                      (right_x - il_w // 2 - 3, left_y - il_h // 2 - 3),
                      (right_x + il_w // 2 + 3, left_y + il_h // 2 + 3),
                      (255, 255, 255), 1)
-        cv2.putText(self.base_image, invalid_label,
+        cv2.putText(draw_target, invalid_label,
                    (right_x - il_w // 2, left_y + il_h // 2),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
+    def _overlay_zones(self, bev_image: np.ndarray):
+        """Vẽ zone highlight lên ảnh BEV hiện tại sau khi full-frame transform."""
+        if not (self.show_zones and self.bev_valid_zone_polygons):
+            return
+
+        self._draw_zones(bev_image)
+        self._draw_zone_labels(bev_image)
     
     def _draw_legend(self, bev_image: np.ndarray, valid_count: int, invalid_count: int, total_count: int):
         """
@@ -1770,7 +1884,7 @@ class IPMBirdEyeViewVisualizer:
         show_labels: bool = True,  # Backwards compatibility with BirdEyeViewVisualizer
         show_trails: bool = True,
         show_speed: bool = False,
-        show_zone_stats: bool = True
+        show_zone_stats: bool = True,
     ) -> np.ndarray:
         """
         Vẽ BEV với các xe từ detections
@@ -1788,6 +1902,7 @@ class IPMBirdEyeViewVisualizer:
             BEV image
         """
         bev_image = self.base_image.copy()
+        self._overlay_zones(bev_image)
         
         if detections is None or len(detections) == 0:
             # Hiển thị legend trống nếu có zones
