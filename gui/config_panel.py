@@ -157,7 +157,7 @@ class ProcessingConfig:
     max_age: int = 90
     trace_length: int = 25
     skip_frames: int = 1
-    min_violation_frames: int = 45
+    min_violation_frames: int = 10
     
     # Visualization settings
     show_boxes: bool = True
