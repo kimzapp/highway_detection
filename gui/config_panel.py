@@ -18,6 +18,16 @@ from PyQt5.QtCore import pyqtSignal, Qt, QThread
 from PyQt5.QtGui import QFont
 
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# DEV-only flags: bật/tắt default local path nhanh trong quá trình phát triển.
+DEV_USE_LOCAL_DEFAULT_PATHS = os.environ.get("HD_DEV_LOCAL_DEFAULT_PATHS", "1") == "1"
+DEV_DEFAULT_MODEL_PATH = os.environ.get(
+    "HD_DEV_DEFAULT_MODEL_PATH",
+    os.path.join(_PROJECT_ROOT, "models", "weights", "best_lva.onnx"),
+)
+DEFAULT_MODEL_PATH = DEV_DEFAULT_MODEL_PATH if DEV_USE_LOCAL_DEFAULT_PATHS else "yolov8n.pt"
+
+
 # Danh sách các model Ultralytics được hỗ trợ tải tự động
 ULTRALYTICS_MODELS = [
     # YOLOv8 Detection
@@ -134,7 +144,7 @@ class ModelLoaderThread(QThread):
 class ProcessingConfig:
     """Cấu hình xử lý video"""
     # Model settings
-    model_path: str = "yolov8n.pt"
+    model_path: str = DEFAULT_MODEL_PATH
     device: str = "cpu"
     img_size: int = 640
     
@@ -146,7 +156,7 @@ class ProcessingConfig:
     # Tracker settings  
     max_age: int = 90
     trace_length: int = 25
-    skip_frames: int = 2
+    skip_frames: int = 1
     min_violation_frames: int = 45
     
     # Visualization settings
@@ -906,7 +916,7 @@ class ConfigPanel(QWidget):
             
     def _save_ui_to_config(self):
         """Lưu UI vào config"""
-        self._config.model_path = self._model_path_edit.text().strip() or "yolov8n.pt"
+        self._config.model_path = self._model_path_edit.text().strip() or DEFAULT_MODEL_PATH
         self._config.device = self._device_combo.currentData() or "cpu"
         self._config.img_size = self._img_size_combo.currentData() or 640
         
