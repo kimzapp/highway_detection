@@ -82,3 +82,5 @@ def test_homography_matrix_is_finite_after_normalization():
 
     assert np.isfinite(transformer.transform_matrix).all()
     assert np.isfinite(transformer.inverse_matrix).all()
+
+

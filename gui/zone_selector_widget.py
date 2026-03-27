@@ -453,6 +453,10 @@ class ZoneSelectorWidget(QWidget):
         self._preview_camera_height: float = 1.5
         self._preview_bev_width: int = 200
         self._preview_bev_height: int = 300
+        self._bev_preview_base_image: Optional[np.ndarray] = None
+        self._bev_preview_transformer = None
+        self._bev_preview_method_used: str = ""
+        self._bev_preview_cache_key: Optional[Tuple] = None
         self._setup_ui()
         self._connect_signals()
 
@@ -469,6 +473,8 @@ class ZoneSelectorWidget(QWidget):
         self._preview_camera_height = max(0.1, float(camera_height))
         self._preview_bev_width = max(120, int(bev_width))
         self._preview_bev_height = max(180, int(bev_height))
+        self._reset_bev_preview_cache()
+        self._preload_bev_preview_background()
         self._update_bev_preview()
         
     def _setup_ui(self):
@@ -693,6 +699,173 @@ class ZoneSelectorWidget(QWidget):
     def set_frame(self, frame: np.ndarray):
         """Đặt frame để chọn zone"""
         self._canvas.set_frame(frame)
+        self._reset_bev_preview_cache()
+        self._preload_bev_preview_background()
+        self._update_bev_preview()
+
+    def _reset_bev_preview_cache(self):
+        """Xóa cache preview để buộc preload lại khi cấu hình/frame đổi."""
+        self._bev_preview_base_image = None
+        self._bev_preview_transformer = None
+        self._bev_preview_method_used = ""
+        self._bev_preview_cache_key = None
+
+    def _build_default_preview_polygon(self, width: int, height: int) -> np.ndarray:
+        """Tạo polygon mặc định để preload BEV trước khi user chọn zone."""
+        top_y = int(height * 0.35)
+        bottom_y = int(height * 0.92)
+        top_left_x = int(width * 0.38)
+        top_right_x = int(width * 0.62)
+        bottom_left_x = int(width * 0.12)
+        bottom_right_x = int(width * 0.88)
+
+        return np.array(
+            [
+                [top_left_x, top_y],
+                [top_right_x, top_y],
+                [bottom_right_x, bottom_y],
+                [bottom_left_x, bottom_y],
+            ],
+            dtype=np.int32,
+        )
+
+    def _preload_bev_preview_background(self) -> bool:
+        """Preload nền BEV để tránh giật ở lần user chọn điểm đầu tiên."""
+        frame = self._canvas._original_frame
+        if frame is None:
+            return False
+
+        h, w = frame.shape[:2]
+        cache_key = (
+            h,
+            w,
+            self._preview_bev_method,
+            self._preview_camera_height,
+            self._preview_bev_width,
+            self._preview_bev_height,
+        )
+
+        if self._bev_preview_cache_key == cache_key and self._bev_preview_base_image is not None:
+            return True
+
+        polygon = self._build_default_preview_polygon(w, h)
+        transformer = None
+        visualizer = None
+        method_used = ""
+
+        from lane_mapping.bird_eye_view import (
+            BirdEyeViewTransformer,
+            BirdEyeViewVisualizer,
+            IPMBirdEyeViewTransformer,
+            IPMBirdEyeViewVisualizer,
+        )
+
+        if self._preview_bev_method == "ipm":
+            try:
+                ipm_transformer = IPMBirdEyeViewTransformer(
+                    frame_width=w,
+                    frame_height=h,
+                    camera_height=self._preview_camera_height,
+                    bev_width=self._preview_bev_width,
+                    bev_height=self._preview_bev_height,
+                    roi_polygon=polygon,
+                    auto_calibrate=True,
+                )
+                ipm_transformer.calibrate_from_frame(frame)
+                transformer = ipm_transformer
+                visualizer = IPMBirdEyeViewVisualizer(
+                    transformer=transformer,
+                    bg_color=(30, 30, 35),
+                    show_grid=True,
+                    show_distance_markers=True,
+                    valid_zone_polygons=[],
+                    show_zones=False,
+                )
+                method_used = "IPM"
+            except Exception:
+                transformer = None
+                visualizer = None
+
+        if transformer is None:
+            try:
+                transformer = BirdEyeViewTransformer(
+                    source_polygon=polygon,
+                    bev_width=self._preview_bev_width,
+                    bev_height=self._preview_bev_height,
+                    margin=20,
+                )
+                visualizer = BirdEyeViewVisualizer(
+                    transformer=transformer,
+                    bg_color=(40, 40, 40),
+                    lane_color=(80, 80, 80),
+                    lane_border_color=(255, 255, 0),
+                    show_zones=False,
+                )
+                method_used = "Homography"
+            except Exception:
+                return False
+
+        self._bev_preview_transformer = transformer
+        self._bev_preview_base_image = visualizer.base_image.copy()
+        self._bev_preview_method_used = method_used
+        self._bev_preview_cache_key = cache_key
+        return True
+
+    def _draw_polygon_preview_on_bev(
+        self,
+        bev_frame: np.ndarray,
+        points: List[Tuple[int, int]],
+        color: Tuple[int, int, int],
+        fill_polygon: bool,
+    ):
+        """Vẽ polygon zone từ image space lên BEV preview bằng transformer đã preload."""
+        if self._bev_preview_transformer is None or len(points) < 2:
+            return
+
+        transformed_pts: List[Tuple[int, int]] = []
+        h, w = bev_frame.shape[:2]
+
+        for pt in points:
+            bev_pt = self._bev_preview_transformer.transform_point((int(pt[0]), int(pt[1])))
+            if bev_pt == (-1, -1):
+                continue
+
+            x = max(0, min(int(bev_pt[0]), w - 1))
+            y = max(0, min(int(bev_pt[1]), h - 1))
+            transformed_pts.append((x, y))
+
+        if len(transformed_pts) < 2:
+            return
+
+        pts_np = np.array(transformed_pts, dtype=np.int32)
+
+        if fill_polygon and len(transformed_pts) >= 3:
+            overlay = bev_frame.copy()
+            cv2.fillPoly(overlay, [pts_np], color)
+            cv2.addWeighted(overlay, 0.35, bev_frame, 0.65, 0, bev_frame)
+
+        cv2.polylines(
+            bev_frame,
+            [pts_np],
+            isClosed=(len(transformed_pts) >= 3),
+            color=color,
+            thickness=2,
+            lineType=cv2.LINE_AA,
+        )
+
+        for idx, (x, y) in enumerate(transformed_pts):
+            cv2.circle(bev_frame, (x, y), 4, (0, 0, 0), -1, cv2.LINE_AA)
+            cv2.circle(bev_frame, (x, y), 3, color, -1, cv2.LINE_AA)
+            cv2.putText(
+                bev_frame,
+                str(idx + 1),
+                (x + 6, y - 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
         
     def _on_point_added(self, point: tuple):
         """Xử lý khi thêm điểm"""
@@ -732,145 +905,71 @@ class ZoneSelectorWidget(QWidget):
         if not self._bev_preview_checkbox.isChecked():
             return
             
-        # Lấy điểm hiện tại đang vẽ
-        current_points = self._canvas.get_current_points()
-        
-        # Nếu có zones đã hoàn thành, sử dụng zone đầu tiên
-        zones = self._canvas.get_zones()
-        if zones:
-            current_points = list(zones[0].points)
-        
-        # Cần ít nhất 4 điểm để tạo BEV preview
-        if len(current_points) < 4:
-            self._bev_preview.setText(f"Cần ít nhất 4 điểm\n(Hiện có: {len(current_points)})")
-            self._bev_preview.setPixmap(QPixmap())  # Clear pixmap
+        if self._canvas._original_frame is None:
+            self._bev_preview.setText("Chưa có frame để preview")
+            self._bev_preview.setPixmap(QPixmap())
             return
-        
+
         try:
-            # Tạo polygon từ các điểm
-            polygon = np.array(current_points, dtype=np.int32)
-            
-            # Lấy frame gốc
-            frame = self._canvas._original_frame
-            if frame is None:
+            if not self._preload_bev_preview_background():
+                self._bev_preview.setText("Không thể preload BEV preview")
+                self._bev_preview.setPixmap(QPixmap())
                 return
-            
-            h, w = frame.shape[:2]
-            bev_width = self._preview_bev_width
-            bev_height = self._preview_bev_height
-            
-            transformer = None
-            visualizer = None
-            method_used = None
-            
-            # Thu thập tất cả zone polygons để hiển thị
-            zone_polygons = [polygon]
+
+            bev_frame = self._bev_preview_base_image.copy()
+            zones = self._canvas.get_zones()
+            current_points = self._canvas.get_current_points()
+
             for zone in zones:
-                if zone.is_valid() and len(zone.points) >= 4:
-                    zone_polygons.append(np.array(zone.points, dtype=np.int32))
-            
-            from lane_mapping.bird_eye_view import (
-                BirdEyeViewTransformer,
-                BirdEyeViewVisualizer,
-                IPMBirdEyeViewTransformer,
-                IPMBirdEyeViewVisualizer,
+                if zone.is_valid():
+                    self._draw_polygon_preview_on_bev(
+                        bev_frame,
+                        list(zone.points),
+                        zone.color,
+                        fill_polygon=True,
+                    )
+
+            if current_points:
+                current_color = self._canvas._zone_colors[len(zones) % len(self._canvas._zone_colors)]
+                self._draw_polygon_preview_on_bev(
+                    bev_frame,
+                    current_points,
+                    current_color,
+                    fill_polygon=(len(current_points) >= 3),
+                )
+
+            info_text = (
+                f"Preview ({self._bev_preview_method_used}) | "
+                f"Current: {len(current_points)} pts | Zones: {len(zones)}"
+            )
+            cv2.putText(
+                bev_frame,
+                info_text,
+                (8, self._preview_bev_height - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (170, 170, 175),
+                1,
+                cv2.LINE_AA,
             )
 
-            # === THỬ IPM TRƯỚC (như trong video.py) ===
-            if self._preview_bev_method == 'ipm':
-                try:
-                    ipm_transformer = IPMBirdEyeViewTransformer(
-                        frame_width=w,
-                        frame_height=h,
-                        camera_height=self._preview_camera_height,
-                        bev_width=bev_width,
-                        bev_height=bev_height,
-                        roi_polygon=polygon,
-                        auto_calibrate=True
-                    )
+            rgb_frame = cv2.cvtColor(bev_frame, cv2.COLOR_BGR2RGB)
+            h_bev, w_bev, ch = rgb_frame.shape
+            bytes_per_line = ch * w_bev
+            q_image = QImage(rgb_frame.data, w_bev, h_bev, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_image)
 
-                    # Calibrate từ frame
-                    ipm_transformer.calibrate_from_frame(frame)
+            preview_size = self._bev_preview.size()
+            scaled_pixmap = pixmap.scaled(
+                preview_size.width() - 10,
+                preview_size.height() - 10,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
 
-                    # Test transform một điểm để đảm bảo hoạt động
-                    test_point = (w // 2, h * 3 // 4)
-                    test_result = ipm_transformer.transform_point(test_point)
-
-                    if test_result == (-1, -1):
-                        raise ValueError("IPM transform returned invalid point")
-
-                    # IPM thành công - tạo visualizer
-                    transformer = ipm_transformer
-                    visualizer = IPMBirdEyeViewVisualizer(
-                        transformer=transformer,
-                        bg_color=(30, 30, 35),
-                        show_grid=True,
-                        show_distance_markers=True,
-                        valid_zone_polygons=zone_polygons,
-                        show_zones=True,
-                        invalid_zone_color=(0, 0, 120),
-                        zone_alpha=0.4
-                    )
-                    method_used = 'IPM'
-
-                except Exception:
-                    # IPM thất bại, sử dụng fallback
-                    transformer = None
-                    visualizer = None
-            
-            # === FALLBACK VỀ HOMOGRAPHY NẾU IPM THẤT BẠI ===
-            if transformer is None:
-                try:
-                    transformer = BirdEyeViewTransformer(
-                        source_polygon=polygon,
-                        bev_width=bev_width,
-                        bev_height=bev_height,
-                        margin=20
-                    )
-                    visualizer = BirdEyeViewVisualizer(
-                        transformer=transformer,
-                        bg_color=(40, 40, 40),
-                        lane_color=(80, 80, 80),
-                        lane_border_color=(255, 255, 0),
-                        show_zones=True,
-                        valid_zone_color=(0, 100, 0),
-                        invalid_zone_color=(0, 0, 100),
-                        zone_alpha=0.4
-                    )
-                    method_used = 'Homography'
-                except Exception as e:
-                    self._bev_preview.setText(f"Lỗi tạo BEV:\n{str(e)[:50]}")
-                    return
-            
-            # === HIỂN THỊ BEV ===
-            if visualizer is not None:
-                # Lấy base image từ visualizer (đã có grid, zones, labels)
-                bev_frame = visualizer.base_image.copy()
-                
-                # Thêm label method đang sử dụng
-                cv2.putText(bev_frame, f"Preview ({method_used})", (10, bev_height - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 155), 1)
-                
-                # Convert sang QPixmap và hiển thị
-                rgb_frame = cv2.cvtColor(bev_frame, cv2.COLOR_BGR2RGB)
-                h_bev, w_bev, ch = rgb_frame.shape
-                bytes_per_line = ch * w_bev
-                q_image = QImage(rgb_frame.data, w_bev, h_bev, bytes_per_line, QImage.Format_RGB888)
-                pixmap = QPixmap.fromImage(q_image)
-                
-                # Scale để fit preview label
-                preview_size = self._bev_preview.size()
-                scaled_pixmap = pixmap.scaled(
-                    preview_size.width() - 10, 
-                    preview_size.height() - 10,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-                
-                self._bev_preview.setPixmap(scaled_pixmap)
-            
+            self._bev_preview.setPixmap(scaled_pixmap)
         except Exception as e:
-            self._bev_preview.setText(f"Lỗi tạo BEV:\n{str(e)[:50]}")
+            self._bev_preview.setText(f"Lỗi tạo BEV:\n{str(e)[:80]}")
         
     def _update_zone_list(self):
         """Cập nhật danh sách zones"""
