@@ -816,6 +816,13 @@ class MainWindow(QMainWindow):
     def _on_config_confirmed(self, processing_config: ProcessingConfig):
         """Xử lý khi cấu hình được xác nhận"""
         self._app_config.processing_config = processing_config
+
+        self._zone_selector.set_bev_preview_config(
+            bev_method=processing_config.bev_method,
+            camera_height=processing_config.camera_height,
+            bev_width=processing_config.bev_width,
+            bev_height=processing_config.bev_height,
+        )
         
         # Load first frame for zone selection
         if self._app_config.source_config:

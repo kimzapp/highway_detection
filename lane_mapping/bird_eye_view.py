@@ -33,13 +33,13 @@ class BirdEyeViewTransformer:
             bev_height: Chiều cao của BEV output
             margin: Margin xung quanh BEV
         """
-        self.source_polygon = source_polygon
+        self.source_polygon = self._normalize_source_polygon(source_polygon)
         self.bev_width = bev_width
         self.bev_height = bev_height
         self.margin = margin
         
         # Sắp xếp các điểm polygon theo thứ tự chuẩn
-        self.source_points = self._order_points(source_polygon)
+        self.source_points = self._order_points(self.source_polygon)
         
         # Chiều rộng và chiều cao khả dụng cho làn đường (trừ margin)
         available_width = bev_width - 2 * margin
@@ -67,6 +67,35 @@ class BirdEyeViewTransformer:
             self.source_points.astype(np.float32)
         )
     
+    def _normalize_source_polygon(self, source_polygon: np.ndarray) -> np.ndarray:
+        """Chuẩn hóa polygon đầu vào để giảm nhiễu hình học do làm tròn/resize."""
+        points = np.asarray(source_polygon, dtype=np.float32).reshape(-1, 2)
+        points = np.round(points).astype(np.int32)
+
+        deduplicated: List[np.ndarray] = []
+        for point in points:
+            if not deduplicated or not np.array_equal(point, deduplicated[-1]):
+                deduplicated.append(point)
+
+        if len(deduplicated) > 1 and np.array_equal(deduplicated[0], deduplicated[-1]):
+            deduplicated.pop()
+
+        if len(deduplicated) < 4:
+            raise ValueError("BEV source polygon cần ít nhất 4 điểm phân biệt")
+
+        return np.array(deduplicated, dtype=np.float32)
+
+    def _order_four_points(self, pts4: np.ndarray) -> np.ndarray:
+        """Sắp xếp 4 điểm: top-left, top-right, bottom-right, bottom-left."""
+        idx_by_y = np.argsort(pts4[:, 1])
+        top = pts4[idx_by_y[:2]]
+        bottom = pts4[idx_by_y[2:]]
+
+        top = top[np.argsort(top[:, 0])]
+        bottom = bottom[np.argsort(bottom[:, 0])]
+
+        return np.array([top[0], top[1], bottom[1], bottom[0]], dtype=np.float32)
+
     def _order_points(self, pts: np.ndarray) -> np.ndarray:
         """
         Sắp xếp 4 điểm theo thứ tự: top-left, top-right, bottom-right, bottom-left
@@ -74,22 +103,7 @@ class BirdEyeViewTransformer:
         Nếu polygon có nhiều hơn 4 điểm, chọn 4 điểm góc (bounding box corners)
         """
         if len(pts) == 4:
-            # Sắp xếp 4 điểm
-            rect = np.zeros((4, 2), dtype=np.float32)
-            
-            # Top-left có tổng x+y nhỏ nhất
-            # Bottom-right có tổng x+y lớn nhất
-            s = pts.sum(axis=1)
-            rect[0] = pts[np.argmin(s)]
-            rect[2] = pts[np.argmax(s)]
-            
-            # Top-right có hiệu y-x nhỏ nhất
-            # Bottom-left có hiệu y-x lớn nhất
-            diff = np.diff(pts, axis=1)
-            rect[1] = pts[np.argmin(diff)]
-            rect[3] = pts[np.argmax(diff)]
-            
-            return rect
+            return self._order_four_points(pts.astype(np.float32))
         else:
             # Với polygon nhiều hơn 4 điểm, tìm bounding quadrilateral
             # Lấy 4 điểm cực: trên cùng, dưới cùng, trái nhất, phải nhất
@@ -121,7 +135,8 @@ class BirdEyeViewTransformer:
                 bottom_left = hull[bottom_idx]
                 bottom_right = hull[bottom_idx]
             
-            return np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+            quad = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+            return self._order_four_points(quad)
     
     def transform_point(self, point: Tuple[int, int]) -> Tuple[int, int]:
         """

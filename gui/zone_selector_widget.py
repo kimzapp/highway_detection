@@ -272,9 +272,10 @@ class ZoneCanvas(QLabel):
         x -= self._offset_x
         y -= self._offset_y
         
-        # Scale back to original coordinates
-        frame_x = int(x / self._display_scale)
-        frame_y = int(y / self._display_scale)
+        # Scale back to original coordinates.
+        # Dùng round để giảm sai số tích lũy do truncate khi vẽ/resize nhiều lần.
+        frame_x = int(round(x / self._display_scale))
+        frame_y = int(round(y / self._display_scale))
         
         # Clamp to frame bounds
         if self._original_frame is not None:
@@ -448,8 +449,27 @@ class ZoneSelectorWidget(QWidget):
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._preview_bev_method: str = "ipm"
+        self._preview_camera_height: float = 1.5
+        self._preview_bev_width: int = 200
+        self._preview_bev_height: int = 300
         self._setup_ui()
         self._connect_signals()
+
+    def set_bev_preview_config(
+        self,
+        bev_method: str = "ipm",
+        camera_height: float = 1.5,
+        bev_width: int = 400,
+        bev_height: int = 600,
+    ):
+        """Đồng bộ cấu hình BEV preview với cấu hình runtime."""
+        method = (bev_method or "ipm").lower()
+        self._preview_bev_method = method if method in {"ipm", "homography"} else "ipm"
+        self._preview_camera_height = max(0.1, float(camera_height))
+        self._preview_bev_width = max(120, int(bev_width))
+        self._preview_bev_height = max(180, int(bev_height))
+        self._update_bev_preview()
         
     def _setup_ui(self):
         """Thiết lập giao diện"""
@@ -736,8 +756,8 @@ class ZoneSelectorWidget(QWidget):
                 return
             
             h, w = frame.shape[:2]
-            bev_width = 200
-            bev_height = 300
+            bev_width = self._preview_bev_width
+            bev_height = self._preview_bev_height
             
             transformer = None
             visualizer = None
@@ -749,53 +769,54 @@ class ZoneSelectorWidget(QWidget):
                 if zone.is_valid() and len(zone.points) >= 4:
                     zone_polygons.append(np.array(zone.points, dtype=np.int32))
             
-            # === THỬ IPM TRƯỚC (như trong video.py) ===
-            try:
-                from lane_mapping.bird_eye_view import (
-                    BirdEyeViewTransformer,
-                    BirdEyeViewVisualizer,
-                    IPMBirdEyeViewTransformer,
-                    IPMBirdEyeViewVisualizer,
-                )
+            from lane_mapping.bird_eye_view import (
+                BirdEyeViewTransformer,
+                BirdEyeViewVisualizer,
+                IPMBirdEyeViewTransformer,
+                IPMBirdEyeViewVisualizer,
+            )
 
-                ipm_transformer = IPMBirdEyeViewTransformer(
-                    frame_width=w,
-                    frame_height=h,
-                    camera_height=1.5,  # Mặc định 1.5m
-                    bev_width=bev_width,
-                    bev_height=bev_height,
-                    roi_polygon=polygon,
-                    auto_calibrate=True
-                )
-                
-                # Calibrate từ frame
-                calibrated = ipm_transformer.calibrate_from_frame(frame)
-                
-                # Test transform một điểm để đảm bảo hoạt động
-                test_point = (w // 2, h * 3 // 4)
-                test_result = ipm_transformer.transform_point(test_point)
-                
-                if test_result == (-1, -1):
-                    raise ValueError("IPM transform returned invalid point")
-                
-                # IPM thành công - tạo visualizer
-                transformer = ipm_transformer
-                visualizer = IPMBirdEyeViewVisualizer(
-                    transformer=transformer,
-                    bg_color=(30, 30, 35),
-                    show_grid=True,
-                    show_distance_markers=True,
-                    valid_zone_polygons=zone_polygons,
-                    show_zones=True,
-                    invalid_zone_color=(0, 0, 120),
-                    zone_alpha=0.4
-                )
-                method_used = 'IPM'
-                
-            except Exception as e:
-                # IPM thất bại, sử dụng fallback
-                transformer = None
-                visualizer = None
+            # === THỬ IPM TRƯỚC (như trong video.py) ===
+            if self._preview_bev_method == 'ipm':
+                try:
+                    ipm_transformer = IPMBirdEyeViewTransformer(
+                        frame_width=w,
+                        frame_height=h,
+                        camera_height=self._preview_camera_height,
+                        bev_width=bev_width,
+                        bev_height=bev_height,
+                        roi_polygon=polygon,
+                        auto_calibrate=True
+                    )
+
+                    # Calibrate từ frame
+                    ipm_transformer.calibrate_from_frame(frame)
+
+                    # Test transform một điểm để đảm bảo hoạt động
+                    test_point = (w // 2, h * 3 // 4)
+                    test_result = ipm_transformer.transform_point(test_point)
+
+                    if test_result == (-1, -1):
+                        raise ValueError("IPM transform returned invalid point")
+
+                    # IPM thành công - tạo visualizer
+                    transformer = ipm_transformer
+                    visualizer = IPMBirdEyeViewVisualizer(
+                        transformer=transformer,
+                        bg_color=(30, 30, 35),
+                        show_grid=True,
+                        show_distance_markers=True,
+                        valid_zone_polygons=zone_polygons,
+                        show_zones=True,
+                        invalid_zone_color=(0, 0, 120),
+                        zone_alpha=0.4
+                    )
+                    method_used = 'IPM'
+
+                except Exception:
+                    # IPM thất bại, sử dụng fallback
+                    transformer = None
+                    visualizer = None
             
             # === FALLBACK VỀ HOMOGRAPHY NẾU IPM THẤT BẠI ===
             if transformer is None:

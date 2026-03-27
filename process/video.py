@@ -248,16 +248,58 @@ class VideoProcessor:
             trace_viz=self.show_traces,
             trace_length=self.trace_length
         )
+
+    def _normalize_zone_polygon_for_frame(
+        self,
+        zone_polygon: np.ndarray,
+        frame_shape: tuple,
+    ) -> np.ndarray:
+        """Chuẩn hóa polygon theo kích thước frame thực để BEV không bị méo."""
+        points = np.asarray(zone_polygon, dtype=np.float32).reshape(-1, 2)
+        h, w = frame_shape[:2]
+
+        points[:, 0] = np.clip(np.round(points[:, 0]), 0, w - 1)
+        points[:, 1] = np.clip(np.round(points[:, 1]), 0, h - 1)
+
+        deduplicated: List[np.ndarray] = []
+        for point in points.astype(np.int32):
+            if not deduplicated or not np.array_equal(point, deduplicated[-1]):
+                deduplicated.append(point)
+
+        if len(deduplicated) > 1 and np.array_equal(deduplicated[0], deduplicated[-1]):
+            deduplicated.pop()
+
+        if len(deduplicated) < 3:
+            raise ValueError("Zone polygon phải có ít nhất 3 điểm phân biệt")
+
+        return np.array(deduplicated, dtype=np.int32)
+
+    def _normalize_zone_polygons_for_frame(
+        self,
+        zone_polygons: List[np.ndarray],
+        frame_shape: tuple,
+    ) -> List[np.ndarray]:
+        """Chuẩn hóa toàn bộ zones theo frame hiện tại."""
+        normalized_polygons: List[np.ndarray] = []
+        for polygon in zone_polygons:
+            normalized = self._normalize_zone_polygon_for_frame(polygon, frame_shape)
+            if len(normalized) >= 3:
+                normalized_polygons.append(normalized)
+
+        if not normalized_polygons:
+            raise ValueError("Không có zone hợp lệ sau khi chuẩn hóa")
+
+        return normalized_polygons
     
     def _init_bev_transformer(
         self, 
         first_frame: np.ndarray, 
         zone_polygon: np.ndarray,
         zone_polygons: list = None,
-        show_progress: bool = True
+        show_progress: bool = True,
     ):
         """
-        Khởi tạo BEV transformer với IPM, fallback về Homography nếu lỗi
+        Khởi tạo BEV transformer 
         
         Args:
             first_frame: Frame đầu tiên để calibrate IPM
@@ -266,10 +308,23 @@ class VideoProcessor:
             show_progress: Hiển thị thông tin tiến trình
         """
         method_used = None
+        h, w = first_frame.shape[:2]
+
+        zone_polygon = self._normalize_zone_polygon_for_frame(zone_polygon, first_frame.shape)
         
         # Nếu không có zone_polygons, wrap zone_polygon
         if zone_polygons is None:
             zone_polygons = [zone_polygon]
+        else:
+            zone_polygons = self._normalize_zone_polygons_for_frame(zone_polygons, first_frame.shape)
+
+        if show_progress:
+            x_min = int(np.min(zone_polygon[:, 0]))
+            x_max = int(np.max(zone_polygon[:, 0]))
+            y_min = int(np.min(zone_polygon[:, 1]))
+            y_max = int(np.max(zone_polygon[:, 1]))
+            print(f"BEV input frame: {w}x{h}")
+            print(f"BEV zone bounds: X=[{x_min}, {x_max}] Y=[{y_min}, {y_max}] points={len(zone_polygon)}")
         
         # Thử IPM trước (nếu được chọn)
         if self.bev_method == 'ipm':
@@ -277,7 +332,6 @@ class VideoProcessor:
                 if show_progress:
                     print("Initializing IPM Bird's Eye View...")
                 
-                h, w = first_frame.shape[:2]
                 self.bev_transformer = IPMBirdEyeViewTransformer(
                     frame_width=w,
                     frame_height=h,
@@ -345,6 +399,11 @@ class VideoProcessor:
                     lane_border_color=(255, 255, 0)
                 )
                 method_used = 'Homography'
+
+                if show_progress:
+                    matrix = self.bev_transformer.transform_matrix
+                    det = float(np.linalg.det(matrix))
+                    print(f"  Homography determinant: {det:.6f}")
                 
             except Exception as e:
                 if show_progress:
@@ -532,6 +591,7 @@ class VideoProcessor:
             if not ret:
                 raise ValueError("Cannot read first frame from video")
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset to beginning
+            zone_polygons = self._normalize_zone_polygons_for_frame(zone_polygons, first_frame.shape)
             
             if show_progress:
                 print(f"Using {len(zone_polygons)} preset zone(s)")
@@ -599,6 +659,7 @@ class VideoProcessor:
             zone_polygons = selector.select_zones(first_frame)
             
             if zone_polygons is not None and len(zone_polygons) > 0:
+                zone_polygons = self._normalize_zone_polygons_for_frame(zone_polygons, first_frame.shape)
                 # Use MultiRoadZoneOverlay for multiple zones
                 self.road_zone_overlay = MultiRoadZoneOverlay(
                     zone_polygons=zone_polygons,
