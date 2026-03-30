@@ -280,22 +280,36 @@ class ProcessingThread(QThread):
                     frame,
                     detections_for_tracking,
                 )
+                render_detections = processor._stabilize_render_detections(
+                    tracked_detections=tracked_detections,
+                    frame_number=frame_count,
+                )
+                if len(tracked_detections) == 0 and len(render_detections) > 0:
+                    annotated_frame = processor._annotate_existing_detections(
+                        frame=annotated_frame,
+                        detections=render_detections,
+                    )
                 timing_totals["tracking"] += time.perf_counter() - track_start
 
                 stage_start = time.perf_counter()
                 if processor.violation_detector is not None and len(tracked_detections) > 0:
-                    processor._current_violations = processor.violation_detector.update(
+                    latest_violations = processor.violation_detector.update(
                         detections=tracked_detections,
                         class_names=processor.model_names,
                         frame_number=frame_count
                     )
                 else:
-                    processor._current_violations = {}
+                    latest_violations = {}
 
-                if processor.violation_visualizer is not None and len(tracked_detections) > 0:
+                processor._current_violations = processor._stabilize_violations(
+                    latest_violations=latest_violations,
+                    frame_number=frame_count,
+                )
+
+                if processor.violation_visualizer is not None and len(render_detections) > 0:
                     annotated_frame = processor.violation_visualizer.draw_violations(
                         frame=annotated_frame,
-                        detections=tracked_detections,
+                        detections=render_detections,
                         current_violations=processor._current_violations,
                         frame_number=frame_count,
                         copy_frame=False,
@@ -313,7 +327,7 @@ class ProcessingThread(QThread):
                 display_frame = annotated_frame
                 if processor.bev_visualizer is not None:
                     bev_frame = processor.bev_visualizer.draw(
-                        detections=tracked_detections,
+                        detections=render_detections,
                         class_names=processor.model_names,
                         show_ids=True,
                         show_labels=True,
@@ -417,6 +431,8 @@ class ProcessingThread(QThread):
         args.track_matching_threshold = pc.track_matching_threshold
         args.trace_length = pc.trace_length
         args.skip_frames = pc.skip_frames
+        args.render_hold_frames = getattr(pc, 'render_hold_frames', 2)
+        args.violation_hold_frames = getattr(pc, 'violation_hold_frames', 2)
         args.min_violation_frames = pc.min_violation_frames
         
         args.show_boxes = pc.show_boxes
