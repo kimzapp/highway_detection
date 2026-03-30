@@ -190,9 +190,26 @@ class VideoProcessor:
         self.device = args.device
         self.conf_threshold = args.conf_thres
         self.iou_threshold = args.iou_thres
+        self.track_activation_threshold = float(
+            getattr(
+                args,
+                'track_activation_threshold',
+                getattr(args, 'track_activation_thres', max(0.4, self.conf_threshold + 0.15))
+            )
+        )
+        self.track_matching_threshold = float(
+            getattr(
+                args,
+                'track_matching_threshold',
+                getattr(args, 'track_match_thres', max(0.7, self.iou_threshold + 0.2))
+            )
+        )
         self.max_age = args.max_age
         self.img_size = args.img_size
         self.classes = args.classes
+
+        self.track_activation_threshold = float(np.clip(self.track_activation_threshold, 0.05, 0.95))
+        self.track_matching_threshold = float(np.clip(self.track_matching_threshold, 0.1, 0.95))
         
         self.show_boxes = args.show_boxes
         self.show_labels = args.show_labels
@@ -204,6 +221,9 @@ class VideoProcessor:
         self.skip_frames = max(0, int(getattr(args, 'skip_frames', 2)))  # Process every N+1 frames
         self.skip_bev_frames = getattr(args, 'skip_bev_frames', 0)  # Skip BEV every N frames
         self.min_violation_frames = max(1, int(getattr(args, 'min_violation_frames', 45)))
+        # Render persistence to reduce annotation flicker on skipped frames.
+        self.render_hold_frames = max(0, int(getattr(args, 'render_hold_frames', 2)))
+        self.violation_hold_frames = max(0, int(getattr(args, 'violation_hold_frames', 2)))
         
         # Tracker sẽ được khởi tạo khi biết fps
         self.tracker: Optional[ByteTracker] = None
@@ -229,6 +249,9 @@ class VideoProcessor:
         self.violation_detector: Optional[ViolationDetector] = None
         self.violation_visualizer: Optional[ViolationVisualizer] = None
         self._current_violations: Dict[int, List[ViolationType]] = {}
+        self._violation_hold_state: Dict[int, Dict[str, Any]] = {}
+        self._last_render_detections: sv.Detections = sv.Detections.empty()
+        self._last_render_frame: int = -10_000
         
         # FPS counter for processing performance
         self.fps_counter: FPSCounter = FPSCounter(window_size=30)
@@ -237,11 +260,25 @@ class VideoProcessor:
         """Khởi tạo tracker với fps thực tế"""
         # Reset FPS counter for new video
         self.fps_counter.reset()
+        self._violation_hold_state.clear()
+        self._current_violations = {}
+        self._last_render_detections = sv.Detections.empty()
+        self._last_render_frame = -10_000
+
+        recommended_min_age = self.skip_frames + 2
+        if self.max_age < recommended_min_age:
+            print(
+                f"Warning: max_age={self.max_age} thấp hơn mức khuyến nghị "
+                f"{recommended_min_age} khi skip_frames={self.skip_frames}."
+            )
+
+        if fps < 15 or fps > 120:
+            print(f"Warning: FPS={fps} bất thường, motion model có thể kém ổn định.")
         
         self.tracker = ByteTracker(
-            track_activation_threshold=self.conf_threshold,
+            track_activation_threshold=self.track_activation_threshold,
             lost_track_buffer=self.max_age,
-            minimum_matching_threshold=self.iou_threshold,
+            minimum_matching_threshold=self.track_matching_threshold,
             frame_rate=fps,
             box_viz=self.show_boxes,
             label_viz=self.show_labels,
@@ -500,6 +537,95 @@ class VideoProcessor:
 
         return detections
 
+    def _stabilize_render_detections(
+        self,
+        tracked_detections: sv.Detections,
+        frame_number: int,
+    ) -> sv.Detections:
+        """Reuse recent tracked detections for a short window to avoid overlay flicker."""
+        if tracked_detections is not None and len(tracked_detections) > 0:
+            self._last_render_detections = tracked_detections
+            self._last_render_frame = frame_number
+            return tracked_detections
+
+        if self.render_hold_frames <= 0:
+            return tracked_detections
+
+        if (
+            len(self._last_render_detections) > 0
+            and (frame_number - self._last_render_frame) <= self.render_hold_frames
+        ):
+            return self._last_render_detections
+
+        return tracked_detections
+
+    def _stabilize_violations(
+        self,
+        latest_violations: Dict[int, List[ViolationType]],
+        frame_number: int,
+    ) -> Dict[int, List[ViolationType]]:
+        """Keep violation labels alive for a short hold window to smooth skipped frames."""
+        if self.violation_hold_frames <= 0:
+            return latest_violations
+
+        for tracker_id, violations in latest_violations.items():
+            if tracker_id is None or not violations:
+                continue
+            self._violation_hold_state[int(tracker_id)] = {
+                "violations": list(violations),
+                "last_seen_frame": frame_number,
+            }
+
+        active_violations: Dict[int, List[ViolationType]] = {}
+        stale_tracker_ids: List[int] = []
+        for tracker_id, state in self._violation_hold_state.items():
+            if (frame_number - int(state["last_seen_frame"])) <= self.violation_hold_frames:
+                active_violations[tracker_id] = list(state["violations"])
+            else:
+                stale_tracker_ids.append(tracker_id)
+
+        for tracker_id in stale_tracker_ids:
+            self._violation_hold_state.pop(tracker_id, None)
+
+        return active_violations
+
+    def _annotate_existing_detections(
+        self,
+        frame: np.ndarray,
+        detections: sv.Detections,
+    ) -> np.ndarray:
+        """Draw tracker overlays from existing detections without updating tracker state."""
+        annotated_frame = frame
+
+        if self.show_traces and self.tracker and self.tracker.trace_annotator:
+            annotated_frame = self.tracker.trace_annotator.annotate(
+                scene=annotated_frame,
+                detections=detections,
+            )
+
+        if self.show_boxes and self.tracker and self.tracker.box_annotator:
+            annotated_frame = self.tracker.box_annotator.annotate(
+                scene=annotated_frame,
+                detections=detections,
+            )
+
+        if self.show_labels and self.tracker and self.tracker.label_annotator and detections.tracker_id is not None:
+            labels = [
+                f"#{tracker_id} {self.model_names[class_id]} {conf:.2f}"
+                for tracker_id, class_id, conf in zip(
+                    detections.tracker_id,
+                    detections.class_id,
+                    detections.confidence,
+                )
+            ]
+            annotated_frame = self.tracker.label_annotator.annotate(
+                scene=annotated_frame,
+                detections=detections,
+                labels=labels,
+            )
+
+        return annotated_frame
+
     def track_with_detections(
         self,
         frame: np.ndarray,
@@ -569,7 +695,8 @@ class VideoProcessor:
         # Get video properties
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+        raw_fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = int(raw_fps) if raw_fps and raw_fps > 0 else 30
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         # Initialize tracker với fps thực tế
@@ -776,6 +903,7 @@ class VideoProcessor:
         inferred_frame_count = 0
         stopped_by_user = False
         cached_detections = sv.Detections.empty()
+        last_inference_frame = -2
         
         if show_progress:
             print("Processing... Press 'q' to quit")
@@ -795,27 +923,48 @@ class VideoProcessor:
                 if should_process_frame:
                     inferred_frame_count += 1
                     cached_detections = self.infer_detections(frame)
+                    last_inference_frame = frame_count
 
-                # Always update tracker. On skipped frames it receives cached detections.
+                if not should_process_frame and (frame_count - last_inference_frame) > 1:
+                    detections_for_tracking = sv.Detections.empty()
+                else:
+                    detections_for_tracking = cached_detections
+
+                # Keep one bridge frame with cached detections, then switch to prediction-only.
                 annotated_frame, tracked_detections = self.track_with_detections(
                     frame,
-                    cached_detections,
+                    detections_for_tracking,
                 )
 
+                render_detections = self._stabilize_render_detections(
+                    tracked_detections=tracked_detections,
+                    frame_number=frame_count,
+                )
+                if len(tracked_detections) == 0 and len(render_detections) > 0:
+                    annotated_frame = self._annotate_existing_detections(
+                        frame=annotated_frame,
+                        detections=render_detections,
+                    )
+
                 if self.violation_detector is not None and len(tracked_detections) > 0:
-                    self._current_violations = self.violation_detector.update(
+                    latest_violations = self.violation_detector.update(
                         detections=tracked_detections,
                         class_names=self.model_names,
                         frame_number=frame_count
                     )
                 else:
-                    self._current_violations = {}
+                    latest_violations = {}
+
+                self._current_violations = self._stabilize_violations(
+                    latest_violations=latest_violations,
+                    frame_number=frame_count,
+                )
 
                 # Draw violations on both processed and skipped frames with latest state.
-                if self.violation_visualizer is not None and len(tracked_detections) > 0:
+                if self.violation_visualizer is not None and len(render_detections) > 0:
                     annotated_frame = self.violation_visualizer.draw_violations(
                         frame=annotated_frame,
-                        detections=tracked_detections,
+                        detections=render_detections,
                         current_violations=self._current_violations,
                         frame_number=frame_count
                     )
@@ -846,7 +995,7 @@ class VideoProcessor:
                     
                     if should_update_bev:
                         bev_frame = self.bev_visualizer.draw(
-                            detections=tracked_detections,
+                            detections=render_detections,
                             class_names=self.model_names,
                             show_ids=True,
                             show_labels=True,

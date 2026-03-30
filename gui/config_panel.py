@@ -155,8 +155,12 @@ class ProcessingConfig:
     
     # Tracker settings  
     max_age: int = 90
+    track_activation_threshold: float = 0.4
+    track_matching_threshold: float = 0.7
     trace_length: int = 25
     skip_frames: int = 1
+    render_hold_frames: int = 2
+    violation_hold_frames: int = 2
     min_violation_frames: int = 10
     
     # Visualization settings
@@ -185,8 +189,12 @@ class ProcessingConfig:
             'iou_threshold': self.iou_threshold,
             'classes': self.classes,
             'max_age': self.max_age,
+            'track_activation_threshold': self.track_activation_threshold,
+            'track_matching_threshold': self.track_matching_threshold,
             'trace_length': self.trace_length,
             'skip_frames': self.skip_frames,
+            'render_hold_frames': self.render_hold_frames,
+            'violation_hold_frames': self.violation_hold_frames,
             'min_violation_frames': self.min_violation_frames,
             'show_boxes': self.show_boxes,
             'show_labels': self.show_labels,
@@ -553,25 +561,43 @@ class ConfigPanel(QWidget):
         self._max_age_spin.setMinimumHeight(35)
         self._max_age_spin.setToolTip("Số frame tối đa giữ track khi không có detection")
         tracker_layout.addWidget(self._max_age_spin, 0, 1)
+
+        tracker_layout.addWidget(QLabel("Track Activation:"), 1, 0)
+        self._track_activation_spin = QDoubleSpinBox()
+        self._track_activation_spin.setRange(0.1, 0.95)
+        self._track_activation_spin.setSingleStep(0.05)
+        self._track_activation_spin.setValue(0.4)
+        self._track_activation_spin.setMinimumHeight(35)
+        self._track_activation_spin.setToolTip("Ngưỡng confidence để tạo track mới (cao hơn = ít ID ảo)")
+        tracker_layout.addWidget(self._track_activation_spin, 1, 1)
+
+        tracker_layout.addWidget(QLabel("Track Matching IoU:"), 2, 0)
+        self._track_matching_spin = QDoubleSpinBox()
+        self._track_matching_spin.setRange(0.3, 0.95)
+        self._track_matching_spin.setSingleStep(0.05)
+        self._track_matching_spin.setValue(0.7)
+        self._track_matching_spin.setMinimumHeight(35)
+        self._track_matching_spin.setToolTip("Ngưỡng IoU để match detection với track hiện có (cao hơn = match chặt hơn)")
+        tracker_layout.addWidget(self._track_matching_spin, 2, 1)
         
         # Trace length
-        tracker_layout.addWidget(QLabel("Trace Length:"), 1, 0)
+        tracker_layout.addWidget(QLabel("Trace Length:"), 3, 0)
         self._trace_length_spin = QSpinBox()
         self._trace_length_spin.setRange(10, 200)
         self._trace_length_spin.setValue(50)
         self._trace_length_spin.setMinimumHeight(35)
         self._trace_length_spin.setToolTip("Độ dài của vệt theo dõi hiển thị")
-        tracker_layout.addWidget(self._trace_length_spin, 1, 1)
+        tracker_layout.addWidget(self._trace_length_spin, 3, 1)
 
-        tracker_layout.addWidget(QLabel("Skip Frames:"), 2, 0)
+        tracker_layout.addWidget(QLabel("Skip Frames:"), 4, 0)
         self._skip_frames_spin = QSpinBox()
         self._skip_frames_spin.setRange(0, 10)
         self._skip_frames_spin.setValue(2)
         self._skip_frames_spin.setMinimumHeight(35)
         self._skip_frames_spin.setToolTip("Số frame bỏ qua trước khi chạy detect/track lại")
-        tracker_layout.addWidget(self._skip_frames_spin, 2, 1)
+        tracker_layout.addWidget(self._skip_frames_spin, 4, 1)
 
-        tracker_layout.addWidget(QLabel("Xác nhận sai làn (frames):"), 3, 0)
+        tracker_layout.addWidget(QLabel("Xác nhận sai làn (frames):"), 5, 0)
         self._min_violation_frames_spin = QSpinBox()
         self._min_violation_frames_spin.setRange(1, 120)
         self._min_violation_frames_spin.setValue(45)
@@ -579,7 +605,7 @@ class ConfigPanel(QWidget):
         self._min_violation_frames_spin.setToolTip(
             "Xe phải liên tiếp ở ngoài vùng hợp lệ đủ số frame này mới tính là vi phạm (mặc định 45 frame ~ 1.5s ở 30 FPS)"
         )
-        tracker_layout.addWidget(self._min_violation_frames_spin, 3, 1)
+        tracker_layout.addWidget(self._min_violation_frames_spin, 5, 1)
         
         tracker_layout.setColumnStretch(2, 1)
         
@@ -589,6 +615,8 @@ class ConfigPanel(QWidget):
         info_label = QLabel(
             "💡 <b>Gợi ý:</b><br>"
             "• <b>Max Age</b>: Tăng nếu xe bị che khuất lâu<br>"
+            "• <b>Track Activation</b>: 0.35-0.5 để giảm track ảo<br>"
+            "• <b>Track Matching IoU</b>: 0.65-0.8 để hạn chế đổi ID<br>"
             "• <b>Trace Length</b>: Tăng để thấy quỹ đạo dài hơn<br>"
             "• <b>Skip Frames</b>: 2-3 giúp tăng FPS đáng kể<br>"
             "• <b>Xác nhận sai làn</b>: Tăng để giảm false positive"
@@ -895,6 +923,8 @@ class ConfigPanel(QWidget):
             
         # Tracker
         self._max_age_spin.setValue(self._config.max_age)
+        self._track_activation_spin.setValue(self._config.track_activation_threshold)
+        self._track_matching_spin.setValue(self._config.track_matching_threshold)
         self._trace_length_spin.setValue(self._config.trace_length)
         self._skip_frames_spin.setValue(self._config.skip_frames)
         self._min_violation_frames_spin.setValue(self._config.min_violation_frames)
@@ -929,6 +959,8 @@ class ConfigPanel(QWidget):
         ]
         
         self._config.max_age = self._max_age_spin.value()
+        self._config.track_activation_threshold = self._track_activation_spin.value()
+        self._config.track_matching_threshold = self._track_matching_spin.value()
         self._config.trace_length = self._trace_length_spin.value()
         self._config.skip_frames = self._skip_frames_spin.value()
         self._config.min_violation_frames = self._min_violation_frames_spin.value()

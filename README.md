@@ -204,6 +204,9 @@ python main.py --source video --input input.mp4 --device cuda --display
 # Tùy chỉnh model và ngưỡng
 python main.py --source video --input input.mp4 --model models/weights/best.pt --conf-thres 0.5 --display
 
+# Giảm đổi ID (ReID) với ngưỡng tracking tách riêng
+python main.py --source video --input input.mp4 --track-activation-thres 0.4 --track-match-thres 0.72 --display
+
 # Chỉ theo dõi một số loại đối tượng (VD: cars=2, trucks=7)
 python main.py --source video --input input.mp4 --classes 2 7 --display
 
@@ -224,11 +227,20 @@ python main.py --source video --input input.mp4 --no-select-zone --display
 | `--model` | yolov8n.pt | Đường dẫn đến model YOLO |
 | `--device` | cpu | Device: cpu hoặc cuda |
 | `--conf-thres` | 0.25 | Ngưỡng confidence |
-| `--iou-thres` | 0.5 | Ngưỡng IoU cho tracking |
+| `--iou-thres` | 0.5 | Ngưỡng IoU cho detection (NMS) |
+| `--track-activation-thres` | 0.4 | Ngưỡng confidence để tạo track mới |
+| `--track-match-thres` | 0.7 | Ngưỡng IoU để match detection với track hiện có |
 | `--classes` | None | Lọc theo class ID |
 | `--enable-bev` | True | Bật Bird's Eye View |
 | `--bev-method` | ipm | Phương pháp BEV: ipm hoặc homography |
 | `--select-zone` | True | Cho phép chọn vùng đường |
+
+### Mẹo giảm ReID / ID Switch
+
+- Nếu xe hay bị đổi ID khi cắt nhau: tăng `--track-match-thres` lên 0.75-0.8.
+- Nếu xuất hiện nhiều ID ảo: tăng `--track-activation-thres` lên 0.45-0.55.
+- Nếu mất track khi bị che khuất ngắn: tăng `--max-age`.
+- Nếu dùng `--skip-frames` cao, nên giữ `--max-age` đủ lớn để tránh rớt track sớm.
 
 ## 📁 Cấu trúc thư mục
 
