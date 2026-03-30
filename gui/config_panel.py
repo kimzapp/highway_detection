@@ -159,6 +159,8 @@ class ProcessingConfig:
     track_matching_threshold: float = 0.7
     trace_length: int = 25
     skip_frames: int = 1
+    render_hold_frames: int = 2
+    violation_hold_frames: int = 2
     min_violation_frames: int = 10
     
     # Visualization settings
@@ -191,6 +193,8 @@ class ProcessingConfig:
             'track_matching_threshold': self.track_matching_threshold,
             'trace_length': self.trace_length,
             'skip_frames': self.skip_frames,
+            'render_hold_frames': self.render_hold_frames,
+            'violation_hold_frames': self.violation_hold_frames,
             'min_violation_frames': self.min_violation_frames,
             'show_boxes': self.show_boxes,
             'show_labels': self.show_labels,
