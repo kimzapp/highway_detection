@@ -1057,6 +1057,7 @@ class VideoProcessor:
                             class_names=self.model_names,
                             show_ids=True,
                             show_labels=True,
+                            current_violations=self._current_violations,
                         )
                         self._last_bev_frame = bev_frame
                     else:
