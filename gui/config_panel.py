@@ -162,6 +162,8 @@ class ProcessingConfig:
     render_hold_frames: int = 2
     violation_hold_frames: int = 2
     min_violation_frames: int = 10
+    enable_invalid_vehicle_detection: bool = False
+    valid_vehicle_class_ids: List[int] = field(default_factory=lambda: [2])
     
     # Visualization settings
     show_boxes: bool = True
@@ -196,6 +198,8 @@ class ProcessingConfig:
             'render_hold_frames': self.render_hold_frames,
             'violation_hold_frames': self.violation_hold_frames,
             'min_violation_frames': self.min_violation_frames,
+            'enable_invalid_vehicle_detection': self.enable_invalid_vehicle_detection,
+            'valid_vehicle_class_ids': self.valid_vehicle_class_ids,
             'show_boxes': self.show_boxes,
             'show_labels': self.show_labels,
             'show_traces': self.show_traces,
@@ -606,6 +610,24 @@ class ConfigPanel(QWidget):
             "Xe phải liên tiếp ở ngoài vùng hợp lệ đủ số frame này mới tính là vi phạm (mặc định 45 frame ~ 1.5s ở 30 FPS)"
         )
         tracker_layout.addWidget(self._min_violation_frames_spin, 5, 1)
+
+        tracker_layout.addWidget(QLabel("Bật phát hiện xe không hợp lệ:"), 6, 0)
+        self._enable_invalid_vehicle_check = QCheckBox("Phát hiện phương tiện không hợp lệ")
+        self._enable_invalid_vehicle_check.setChecked(False)
+        self._enable_invalid_vehicle_check.setToolTip(
+            "Khi bật, class không nằm trong danh sách hợp lệ sẽ bị gắn vi phạm."
+        )
+        tracker_layout.addWidget(self._enable_invalid_vehicle_check, 6, 1)
+
+        tracker_layout.addWidget(QLabel("Class hợp lệ (IDs):"), 7, 0)
+        self._valid_vehicle_ids_edit = QLineEdit()
+        self._valid_vehicle_ids_edit.setText("2")
+        self._valid_vehicle_ids_edit.setPlaceholderText("VD: 2 hoặc 2, 5, 7")
+        self._valid_vehicle_ids_edit.setMinimumHeight(35)
+        self._valid_vehicle_ids_edit.setToolTip(
+            "Danh sách class ID hợp lệ, phân tách bởi dấu phẩy. Mặc định chỉ ô tô: 2"
+        )
+        tracker_layout.addWidget(self._valid_vehicle_ids_edit, 7, 1)
         
         tracker_layout.setColumnStretch(2, 1)
         
@@ -619,7 +641,8 @@ class ConfigPanel(QWidget):
             "• <b>Track Matching IoU</b>: 0.65-0.8 để hạn chế đổi ID<br>"
             "• <b>Trace Length</b>: Tăng để thấy quỹ đạo dài hơn<br>"
             "• <b>Skip Frames</b>: 2-3 giúp tăng FPS đáng kể<br>"
-            "• <b>Xác nhận sai làn</b>: Tăng để giảm false positive"
+            "• <b>Xác nhận sai làn</b>: Tăng để giảm false positive<br>"
+            "• <b>Xe không hợp lệ</b>: Dùng cùng ngưỡng xác nhận với sai làn"
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("""
@@ -883,6 +906,19 @@ class ConfigPanel(QWidget):
         """Bỏ chọn tất cả classes"""
         for checkbox in self._class_checkboxes.values():
             checkbox.setChecked(False)
+    
+    def _parse_class_ids_text(self, text: str) -> List[int]:
+        """Parse chuỗi class ID dạng '2,5,7' thành list int."""
+        tokens = [token.strip() for token in text.replace(';', ',').split(',') if token.strip()]
+        parsed: List[int] = []
+        for token in tokens:
+            try:
+                class_id = int(token)
+            except ValueError:
+                continue
+            if class_id >= 0 and class_id not in parsed:
+                parsed.append(class_id)
+        return parsed
             
     def _reset_to_defaults(self):
         """Reset về giá trị mặc định"""
@@ -930,6 +966,11 @@ class ConfigPanel(QWidget):
         self._min_violation_frames_spin.setValue(self._config.min_violation_frames)
         
         # Visualization
+        self._enable_invalid_vehicle_check.setChecked(self._config.enable_invalid_vehicle_detection)
+        valid_ids_text = ", ".join(str(class_id) for class_id in self._config.valid_vehicle_class_ids)
+        self._valid_vehicle_ids_edit.setText(valid_ids_text or "2")
+        
+        # Visualization
         self._show_boxes_check.setChecked(self._config.show_boxes)
         self._show_labels_check.setChecked(self._config.show_labels)
         self._show_traces_check.setChecked(self._config.show_traces)
@@ -964,6 +1005,12 @@ class ConfigPanel(QWidget):
         self._config.trace_length = self._trace_length_spin.value()
         self._config.skip_frames = self._skip_frames_spin.value()
         self._config.min_violation_frames = self._min_violation_frames_spin.value()
+        self._config.enable_invalid_vehicle_detection = self._enable_invalid_vehicle_check.isChecked()
+        parsed_valid_ids = self._parse_class_ids_text(self._valid_vehicle_ids_edit.text())
+        self._config.valid_vehicle_class_ids = parsed_valid_ids or [2]
+        self._valid_vehicle_ids_edit.setText(
+            ", ".join(str(class_id) for class_id in self._config.valid_vehicle_class_ids)
+        )
         
         self._config.show_boxes = self._show_boxes_check.isChecked()
         self._config.show_labels = self._show_labels_check.isChecked()

@@ -151,7 +151,15 @@ class ProcessingThread(QThread):
             processor.violation_detector = ViolationDetector(
                 min_violation_frames=processor.min_violation_frames,
                 min_normal_frames=3,
-                enabled_violations={ViolationType.WRONG_LANE}
+                enabled_violations={
+                    ViolationType.WRONG_LANE,
+                    *(
+                        [ViolationType.INVALID_VEHICLE]
+                        if processor.enable_invalid_vehicle_detection
+                        else []
+                    ),
+                },
+                valid_vehicle_class_ids=processor.valid_vehicle_class_ids,
             )
             np_zone_polygons = [np.array(z) for z in zone_polygons]
             processor.violation_detector.set_valid_zones(np_zone_polygons)
@@ -163,7 +171,10 @@ class ProcessingThread(QThread):
                 show_violation_label=True,
                 show_stats_panel=True
             )
-            print("Violation Detector initialized")
+            print(
+                "Violation Detector initialized "
+                f"(WRONG_LANE, INVALID_VEHICLE={processor.enable_invalid_vehicle_detection})"
+            )
             
             # Initialize BEV
             if processor.enable_bev:
@@ -434,6 +445,8 @@ class ProcessingThread(QThread):
         args.render_hold_frames = getattr(pc, 'render_hold_frames', 2)
         args.violation_hold_frames = getattr(pc, 'violation_hold_frames', 2)
         args.min_violation_frames = pc.min_violation_frames
+        args.enable_invalid_vehicle_detection = pc.enable_invalid_vehicle_detection
+        args.valid_vehicle_class_ids = pc.valid_vehicle_class_ids
         
         args.show_boxes = pc.show_boxes
         args.show_labels = pc.show_labels

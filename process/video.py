@@ -221,6 +221,12 @@ class VideoProcessor:
         self.skip_frames = max(0, int(getattr(args, 'skip_frames', 2)))  # Process every N+1 frames
         self.skip_bev_frames = getattr(args, 'skip_bev_frames', 0)  # Skip BEV every N frames
         self.min_violation_frames = max(1, int(getattr(args, 'min_violation_frames', 45)))
+        self.enable_invalid_vehicle_detection = bool(
+            getattr(args, 'enable_invalid_vehicle_detection', False)
+        )
+        valid_vehicle_classes = getattr(args, 'valid_vehicle_class_ids', [2])
+        configured_valid_ids = {int(class_id) for class_id in (valid_vehicle_classes or [2])}
+        self.valid_vehicle_class_ids = self._resolve_valid_vehicle_class_ids(configured_valid_ids)
         # Render persistence to reduce annotation flicker on skipped frames.
         self.render_hold_frames = max(0, int(getattr(args, 'render_hold_frames', 2)))
         self.violation_hold_frames = max(0, int(getattr(args, 'violation_hold_frames', 2)))
@@ -255,6 +261,33 @@ class VideoProcessor:
         
         # FPS counter for processing performance
         self.fps_counter: FPSCounter = FPSCounter(window_size=30)
+
+    def _resolve_valid_vehicle_class_ids(self, configured_ids: set[int]) -> set[int]:
+        """Resolve valid class IDs for INVALID_VEHICLE, with safe default for custom models."""
+        resolved_ids = set(configured_ids or {2})
+
+        # Nếu user giữ mặc định {2} nhưng model custom không có class_id=2,
+        # tự map sang class có tên "car" để tránh gắn cờ sai cho ô tô.
+        if resolved_ids == {2} and 2 not in self.model_names:
+            car_aliases = {"car", "automobile", "oto", "o to"}
+            inferred_car_ids: set[int] = set()
+
+            for class_id, class_name in self.model_names.items():
+                normalized_name = str(class_name).strip().lower()
+                if normalized_name in car_aliases:
+                    try:
+                        inferred_car_ids.add(int(class_id))
+                    except (TypeError, ValueError):
+                        continue
+
+            if inferred_car_ids:
+                resolved_ids = inferred_car_ids
+                print(
+                    "Auto-mapped valid vehicle classes from model names: "
+                    f"{sorted(resolved_ids)}"
+                )
+
+        return resolved_ids
     
     def _init_tracker(self, fps: int = 30):
         """Khởi tạo tracker với fps thực tế"""
@@ -505,12 +538,15 @@ class VideoProcessor:
 
     def infer_detections(self, frame: np.ndarray) -> sv.Detections:
         """Run model inference and convert output to supervision detections."""
+        # INVALID_VEHICLE cần nhìn thấy tất cả class để tránh bỏ sót vi phạm.
+        effective_classes = None if self.enable_invalid_vehicle_detection else self.classes
+
         # Run detection với model handler (sử dụng half precision nếu có)
         results = self.model_handler.predict(
             frame, 
             conf=self.conf_threshold, 
             iou=self.iou_threshold,
-            classes=self.classes,
+            classes=effective_classes,
             imgsz=self.img_size,
             half=self.use_half
         )
@@ -520,8 +556,8 @@ class VideoProcessor:
             # Ultralytics model - use built-in converter
             detections = sv.Detections.from_ultralytics(results[0])
             # Filter by classes if specified
-            if self.classes is not None:
-                detections = detections[np.isin(detections.class_id, self.classes)]
+            if effective_classes is not None:
+                detections = detections[np.isin(detections.class_id, effective_classes)]
         else:
             # ONNX hoặc model khác - tạo Detections từ boxes, scores, class_ids
             boxes, scores, class_ids = self.model_handler.get_detections(results)
@@ -734,7 +770,15 @@ class VideoProcessor:
             self.violation_detector = ViolationDetector(
                 min_violation_frames=self.min_violation_frames,
                 min_normal_frames=3,
-                enabled_violations={ViolationType.WRONG_LANE}
+                enabled_violations={
+                    ViolationType.WRONG_LANE,
+                    *(
+                        [ViolationType.INVALID_VEHICLE]
+                        if self.enable_invalid_vehicle_detection
+                        else []
+                    ),
+                },
+                valid_vehicle_class_ids=self.valid_vehicle_class_ids,
             )
             # Convert zone_polygons to numpy arrays for detector
             np_zone_polygons = [np.array(z) for z in zone_polygons]
@@ -749,7 +793,10 @@ class VideoProcessor:
             )
             
             if show_progress:
-                print("Violation Detector initialized (WRONG_LANE detection enabled)")
+                print(
+                    "Violation Detector initialized "
+                    f"(WRONG_LANE, INVALID_VEHICLE={self.enable_invalid_vehicle_detection})"
+                )
             
             # Initialize Bird's Eye View transformer
             if self.enable_bev:
@@ -797,7 +844,15 @@ class VideoProcessor:
                 self.violation_detector = ViolationDetector(
                     min_violation_frames=self.min_violation_frames,
                     min_normal_frames=3,
-                    enabled_violations={ViolationType.WRONG_LANE}
+                    enabled_violations={
+                        ViolationType.WRONG_LANE,
+                        *(
+                            [ViolationType.INVALID_VEHICLE]
+                            if self.enable_invalid_vehicle_detection
+                            else []
+                        ),
+                    },
+                    valid_vehicle_class_ids=self.valid_vehicle_class_ids,
                 )
                 # Convert zone_polygons to numpy arrays for detector
                 np_zone_polygons = [np.array(z) for z in zone_polygons]
@@ -812,7 +867,10 @@ class VideoProcessor:
                 )
                 
                 if show_progress:
-                    print("Violation Detector initialized (WRONG_LANE detection enabled)")
+                    print(
+                        "Violation Detector initialized "
+                        f"(WRONG_LANE, INVALID_VEHICLE={self.enable_invalid_vehicle_detection})"
+                    )
                 
                 # Initialize Bird's Eye View transformer with primary zone
                 # (uses first zone or combined polygon)

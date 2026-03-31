@@ -75,6 +75,12 @@ def parse_args():
                         help="Keep last violation labels for N frames when detections are briefly missing")
     parser.add_argument("--min-violation-frames", type=int, default=45,
                         help="Minimum consecutive frames outside valid zone before counting wrong-lane violation")
+    parser.add_argument("--enable-invalid-vehicle", action="store_true", default=False,
+                        help="Enable invalid-vehicle violation detection based on valid class list")
+    parser.add_argument("--no-invalid-vehicle", dest="enable_invalid_vehicle_detection", action="store_false",
+                        help="Disable invalid-vehicle violation detection")
+    parser.add_argument("--valid-vehicle-classes", nargs="+", type=int, default=[2],
+                        help="Class IDs considered valid vehicles for invalid-vehicle detection")
     
     return parser.parse_args()
 

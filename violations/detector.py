@@ -19,6 +19,7 @@ import supervision as sv
 class ViolationType(Enum):
     """Enum định nghĩa các loại vi phạm"""
     WRONG_LANE = auto()           # Đi sai làn đường / ngoài vùng cho phép
+    INVALID_VEHICLE = auto()      # Phương tiện không hợp lệ theo danh sách cấu hình
     # Có thể mở rộng thêm các loại vi phạm khác:
     # SPEEDING = auto()           # Vượt quá tốc độ cho phép
     # ILLEGAL_OVERTAKE = auto()   # Vượt xe trái phép
@@ -93,7 +94,8 @@ class ViolationDetector:
         self,
         min_violation_frames: int = 45,
         min_normal_frames: int = 3,
-        enabled_violations: Optional[Set[ViolationType]] = None
+        enabled_violations: Optional[Set[ViolationType]] = None,
+        valid_vehicle_class_ids: Optional[Set[int]] = None,
     ):
         """
         Khởi tạo ViolationDetector
@@ -105,6 +107,7 @@ class ViolationDetector:
         """
         self.min_violation_frames = min_violation_frames
         self.min_normal_frames = min_normal_frames
+        self.valid_vehicle_class_ids: Set[int] = set(valid_vehicle_class_ids or {2})
         
         # Mặc định bật tất cả các loại vi phạm
         self.enabled_violations = enabled_violations or {v for v in ViolationType}
@@ -155,6 +158,10 @@ class ViolationDetector:
     def disable_violation(self, violation_type: ViolationType):
         """Tắt phát hiện một loại vi phạm"""
         self.enabled_violations.discard(violation_type)
+
+    def set_valid_vehicle_classes(self, class_ids: Set[int]):
+        """Đặt danh sách class phương tiện hợp lệ (không bị gắn cờ INVALID_VEHICLE)."""
+        self.valid_vehicle_class_ids = set(class_ids or {2})
     
     def is_point_in_valid_zone(self, point: Tuple[int, int]) -> bool:
         """
@@ -215,6 +222,16 @@ class ViolationDetector:
         if not is_in_valid_zone:
             return ViolationType.WRONG_LANE
         
+        return None
+
+    def _check_invalid_vehicle(self, class_id: int) -> Optional[ViolationType]:
+        """Kiểm tra phương tiện không hợp lệ theo danh sách class được cấu hình."""
+        if ViolationType.INVALID_VEHICLE not in self.enabled_violations:
+            return None
+
+        if class_id not in self.valid_vehicle_class_ids:
+            return ViolationType.INVALID_VEHICLE
+
         return None
     
     def update(
@@ -282,13 +299,18 @@ class ViolationDetector:
             
             # Kiểm tra các loại vi phạm
             detected_violations = []
+
+            # 1. Kiểm tra phương tiện không hợp lệ
+            invalid_vehicle = self._check_invalid_vehicle(int(class_id))
+            if invalid_vehicle:
+                detected_violations.append(invalid_vehicle)
             
-            # 1. Kiểm tra vi phạm sai làn
+            # 2. Kiểm tra vi phạm sai làn
             wrong_lane = self._check_wrong_lane(tracker_id, position, state)
             if wrong_lane:
                 detected_violations.append(wrong_lane)
             
-            # 2. Có thể thêm các kiểm tra vi phạm khác ở đây:
+            # 3. Có thể thêm các kiểm tra vi phạm khác ở đây:
             # speeding = self._check_speeding(tracker_id, position, state)
             # if speeding:
             #     detected_violations.append(speeding)
@@ -414,12 +436,14 @@ class ViolationVisualizer:
     # Màu sắc cho từng loại vi phạm (BGR)
     VIOLATION_COLORS: Dict[ViolationType, Tuple[int, int, int]] = {
         ViolationType.WRONG_LANE: (0, 0, 255),         # Đỏ
+        ViolationType.INVALID_VEHICLE: (0, 165, 255),  # Cam
         # Thêm màu cho các loại vi phạm khác khi cần
     }
     
     # Tên hiển thị cho từng loại vi phạm
     VIOLATION_NAMES: Dict[ViolationType, str] = {
         ViolationType.WRONG_LANE: "SAI LAN DUONG",
+        ViolationType.INVALID_VEHICLE: "PHUONG TIEN KHONG HOP LE",
         # Thêm tên cho các loại vi phạm khác khi cần
     }
     
