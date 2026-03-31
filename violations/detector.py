@@ -413,7 +413,7 @@ class ViolationDetector:
                 detected_violations.append(invalid_vehicle)
             
             # 2. Kiểm tra vi phạm sai làn
-            wrong_lane = self._check_wrong_lane(tracker_id, position, state)
+            wrong_lane = self._check_wrong_lane(tracker_id, box, position, bev_position, state)
             if wrong_lane:
                 detected_violations.append(wrong_lane)
             
