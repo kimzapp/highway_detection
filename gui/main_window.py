@@ -120,6 +120,13 @@ class ProcessingThread(QThread):
         """Xử lý video và emit frame về GUI thay vì dùng cv2.imshow"""
         from lane_mapping.road_zone import MultiRoadZoneOverlay
         from lane_mapping.bird_eye_view import create_combined_view
+        from process.artifact_writer import (
+            AsyncViolationArtifactWriter,
+            cleanup_video_artifacts,
+            make_video_key,
+            make_violation_id,
+            serialize_tracked_detections,
+        )
         from violations import ViolationDetector, ViolationVisualizer, ViolationType
 
         if run_started_at is None:
@@ -146,6 +153,12 @@ class ProcessingThread(QThread):
         
         print(f"Video: {video_path}")
         print(f"Resolution: {width}x{height}, FPS: {fps}, Total frames: {total_frames}")
+
+        artifact_video_key = make_video_key(video_path)
+        artifact_dir = cleanup_video_artifacts(video_path, artifact_root=processor.artifact_root_dir)
+        artifact_opened_ids: set[str] = set()
+        artifact_closed_ids: set[str] = set()
+        artifact_summary = {"artifact_paths": {}, "dropped_messages": 0, "artifact_dir": artifact_dir}
         
         # Handle preset zones
         first_frame = None
@@ -261,6 +274,13 @@ class ProcessingThread(QThread):
         
         frame_count = 0
         inferred_frame_count = 0
+        artifact_writer = AsyncViolationArtifactWriter(
+            video_path=video_path,
+            fps=float(fps),
+            artifact_root=processor.artifact_root_dir,
+            valid_zone_polygons=zone_polygons,
+        )
+        artifact_writer.start()
         benchmark_every = 120
         timing_totals = {
             "inference": 0.0,
@@ -305,6 +325,8 @@ class ProcessingThread(QThread):
                 else:
                     detections_for_tracking = cached_detections
 
+                artifact_frame = frame.copy()
+
                 track_start = time.perf_counter()
                 annotated_frame, tracked_detections = processor.track_with_detections(
                     frame,
@@ -335,6 +357,43 @@ class ProcessingThread(QThread):
                     latest_violations=latest_violations,
                     frame_number=frame_count,
                 )
+
+                artifact_writer.enqueue_frame(
+                    frame_number=frame_count,
+                    frame=artifact_frame,
+                    detections=serialize_tracked_detections(tracked_detections, processor.model_names),
+                )
+
+                if processor.violation_detector is not None:
+                    for violation in processor.violation_detector.get_violations_log():
+                        violation_id = make_violation_id(
+                            artifact_video_key,
+                            int(violation.tracker_id),
+                            str(violation.violation_type.name),
+                            int(violation.frame_number),
+                        )
+
+                        if violation_id not in artifact_opened_ids:
+                            artifact_writer.on_violation_started(
+                                {
+                                    "violation_id": violation_id,
+                                    "tracker_id": int(violation.tracker_id),
+                                    "class_name": str(violation.class_name),
+                                    "violation_type": str(violation.violation_type.name),
+                                    "start_frame": int(violation.frame_number),
+                                    "fps": float(fps),
+                                }
+                            )
+                            artifact_opened_ids.add(violation_id)
+
+                        if violation.end_frame is not None and violation_id not in artifact_closed_ids:
+                            artifact_writer.on_violation_ended(
+                                {
+                                    "violation_id": violation_id,
+                                    "end_frame": int(violation.end_frame),
+                                }
+                            )
+                            artifact_closed_ids.add(violation_id)
 
                 if processor.violation_visualizer is not None and len(render_detections) > 0:
                     annotated_frame = processor.violation_visualizer.draw_violations(
@@ -412,6 +471,27 @@ class ProcessingThread(QThread):
                 
         finally:
             cap.release()
+
+            if processor.violation_detector is not None:
+                processor.violation_detector.finalize_open_violations(max(0, frame_count - 1))
+                for violation in processor.violation_detector.get_violations_log():
+                    violation_id = make_violation_id(
+                        artifact_video_key,
+                        int(violation.tracker_id),
+                        str(violation.violation_type.name),
+                        int(violation.frame_number),
+                    )
+                    if violation.end_frame is not None and violation_id not in artifact_closed_ids:
+                        artifact_writer.on_violation_ended(
+                            {
+                                "violation_id": violation_id,
+                                "end_frame": int(violation.end_frame),
+                            }
+                        )
+                        artifact_closed_ids.add(violation_id)
+
+            artifact_summary = artifact_writer.close()
+
             if async_writer:
                 async_writer.close()
 
@@ -419,6 +499,17 @@ class ProcessingThread(QThread):
             violations_log = []
             if processor.violation_detector is not None:
                 violations_log = processor.violation_detector.get_violations_log()
+                artifact_paths = artifact_summary.get("artifact_paths") or {}
+                for violation in violations_log:
+                    violation_id = make_violation_id(
+                        artifact_video_key,
+                        int(violation.tracker_id),
+                        str(violation.violation_type.name),
+                        int(violation.frame_number),
+                    )
+                    clip_path = artifact_paths.get(violation_id)
+                    if clip_path:
+                        violation.extra_info["artifact_clip_path"] = clip_path
 
             self._run_summary = {
                 "video_path": video_path,
@@ -432,12 +523,15 @@ class ProcessingThread(QThread):
                 "started_at": run_started_at,
                 "finished_at": run_finished_at,
                 "violations": violations_log,
+                "artifact_summary": artifact_summary,
             }
 
             print(f"Processed {frame_count} frames")
             print(f"Inference ran on {inferred_frame_count} frames (skip={processor.skip_frames})")
             if async_writer and async_writer.dropped_frames > 0:
                 print(f"Dropped frames while writing: {async_writer.dropped_frames}")
+            if artifact_summary.get("dropped_messages", 0) > 0:
+                print(f"Dropped artifact messages: {artifact_summary['dropped_messages']}")
             if frame_count > 0:
                 print(
                     "[Perf] Final averages: "
@@ -505,6 +599,7 @@ class ProcessingThread(QThread):
         args.output = pc.output_path
         args.save_video = pc.save_video
         args.display = True
+        args.artifact_root_dir = getattr(pc, 'artifact_root_dir', None)
         
         args.select_zone = False
         

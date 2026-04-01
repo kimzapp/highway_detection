@@ -20,6 +20,13 @@ from lane_mapping.bird_eye_view import (
     create_combined_view
 )
 from violations import ViolationDetector, ViolationVisualizer, ViolationType
+from .artifact_writer import (
+    AsyncViolationArtifactWriter,
+    cleanup_video_artifacts,
+    make_video_key,
+    make_violation_id,
+    serialize_tracked_detections,
+)
 from .fps_counter import FPSCounter
 
 
@@ -230,6 +237,7 @@ class VideoProcessor:
         # Render persistence to reduce annotation flicker on skipped frames.
         self.render_hold_frames = max(0, int(getattr(args, 'render_hold_frames', 2)))
         self.violation_hold_frames = max(0, int(getattr(args, 'violation_hold_frames', 2)))
+        self.artifact_root_dir = getattr(args, 'artifact_root_dir', None)
         
         # Tracker sẽ được khởi tạo khi biết fps
         self.tracker: Optional[ByteTracker] = None
@@ -741,6 +749,19 @@ class VideoProcessor:
         if show_progress:
             print(f"Video: {video_path}")
             print(f"Resolution: {width}x{height}, FPS: {fps}, Total frames: {total_frames}")
+
+        artifact_video_key = make_video_key(video_path)
+        artifact_dir = cleanup_video_artifacts(
+            video_path,
+            artifact_root=self.artifact_root_dir,
+        )
+        artifact_opened_ids: set[str] = set()
+        artifact_closed_ids: set[str] = set()
+        artifact_summary: Dict[str, Any] = {
+            "artifact_paths": {},
+            "dropped_messages": 0,
+            "artifact_dir": artifact_dir,
+        }
         
         # Handle zones - either from preset or interactive selection
         first_frame = None
@@ -962,6 +983,13 @@ class VideoProcessor:
         stopped_by_user = False
         cached_detections = sv.Detections.empty()
         last_inference_frame = -2
+        artifact_writer = AsyncViolationArtifactWriter(
+            video_path=video_path,
+            fps=float(fps),
+            artifact_root=self.artifact_root_dir,
+            valid_zone_polygons=zone_polygons,
+        )
+        artifact_writer.start()
         
         if show_progress:
             print("Processing... Press 'q' to quit")
@@ -987,6 +1015,8 @@ class VideoProcessor:
                     detections_for_tracking = sv.Detections.empty()
                 else:
                     detections_for_tracking = cached_detections
+
+                artifact_frame = frame.copy()
 
                 # Keep one bridge frame with cached detections, then switch to prediction-only.
                 annotated_frame, tracked_detections = self.track_with_detections(
@@ -1017,6 +1047,43 @@ class VideoProcessor:
                     latest_violations=latest_violations,
                     frame_number=frame_count,
                 )
+
+                artifact_writer.enqueue_frame(
+                    frame_number=frame_count,
+                    frame=artifact_frame,
+                    detections=serialize_tracked_detections(tracked_detections, self.model_names),
+                )
+
+                if self.violation_detector is not None:
+                    for violation in self.violation_detector.get_violations_log():
+                        violation_id = make_violation_id(
+                            artifact_video_key,
+                            int(violation.tracker_id),
+                            str(violation.violation_type.name),
+                            int(violation.frame_number),
+                        )
+
+                        if violation_id not in artifact_opened_ids:
+                            artifact_writer.on_violation_started(
+                                {
+                                    "violation_id": violation_id,
+                                    "tracker_id": int(violation.tracker_id),
+                                    "class_name": str(violation.class_name),
+                                    "violation_type": str(violation.violation_type.name),
+                                    "start_frame": int(violation.frame_number),
+                                    "fps": float(fps),
+                                }
+                            )
+                            artifact_opened_ids.add(violation_id)
+
+                        if violation.end_frame is not None and violation_id not in artifact_closed_ids:
+                            artifact_writer.on_violation_ended(
+                                {
+                                    "violation_id": violation_id,
+                                    "end_frame": int(violation.end_frame),
+                                }
+                            )
+                            artifact_closed_ids.add(violation_id)
 
                 # Draw violations on both processed and skipped frames with latest state.
                 if self.violation_visualizer is not None and len(render_detections) > 0:
@@ -1098,12 +1165,48 @@ class VideoProcessor:
         finally:
             # Cleanup
             cap.release()
+
+            if self.violation_detector is not None:
+                self.violation_detector.finalize_open_violations(max(0, frame_count - 1))
+                for violation in self.violation_detector.get_violations_log():
+                    violation_id = make_violation_id(
+                        artifact_video_key,
+                        int(violation.tracker_id),
+                        str(violation.violation_type.name),
+                        int(violation.frame_number),
+                    )
+                    if violation.end_frame is not None and violation_id not in artifact_closed_ids:
+                        artifact_writer.on_violation_ended(
+                            {
+                                "violation_id": violation_id,
+                                "end_frame": int(violation.end_frame),
+                            }
+                        )
+                        artifact_closed_ids.add(violation_id)
+
+            artifact_summary = artifact_writer.close()
+
+            if self.violation_detector is not None:
+                artifact_paths = artifact_summary.get("artifact_paths") or {}
+                for violation in self.violation_detector.get_violations_log():
+                    violation_id = make_violation_id(
+                        artifact_video_key,
+                        int(violation.tracker_id),
+                        str(violation.violation_type.name),
+                        int(violation.frame_number),
+                    )
+                    clip_path = artifact_paths.get(violation_id)
+                    if clip_path:
+                        violation.extra_info["artifact_clip_path"] = clip_path
+
             if async_writer:
                 async_writer.close()
             cv2.destroyAllWindows()
 
         if show_progress and async_writer and async_writer.dropped_frames > 0:
             print(f"Dropped frames while writing: {async_writer.dropped_frames}")
+        if show_progress and artifact_summary.get("dropped_messages", 0) > 0:
+            print(f"Dropped artifact messages: {artifact_summary['dropped_messages']}")
         
         if show_progress:
             print(f"\nDone! Processed {frame_count} frames")
@@ -1120,6 +1223,7 @@ class VideoProcessor:
             "source_height": height,
             "stopped_by_user": stopped_by_user,
             "output_path": output_path,
+            "artifact_summary": artifact_summary,
             "fps_stats": self.fps_counter.get_stats()
         }
     

@@ -48,6 +48,12 @@ def parse_args():
         default=None,
         help="SQLite path to store video metadata and violations",
     )
+    parser.add_argument(
+        "--artifact-root-dir",
+        type=str,
+        default=None,
+        help="Root directory to store local violation artifact clips",
+    )
     
     # Road zone options
     parser.add_argument("--select-zone", action="store_true", default=True, 
