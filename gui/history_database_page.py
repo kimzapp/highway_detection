@@ -154,8 +154,8 @@ class HistoryDatabasePage(QWidget):
             "Type",
             "Tracker",
             "Class",
-            "Frame",
-            "Confidence",
+            "Frame Range",
+            "Evidence Clip",
         ])
         self._violation_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._violation_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -292,8 +292,8 @@ class HistoryDatabasePage(QWidget):
                 violation.get("violation_type", ""),
                 str(violation.get("tracker_id", "")),
                 class_display,
-                str(violation.get("frame_number", "")),
-                f"{float(violation.get('confidence', 0.0)):.2f}",
+                f"{violation.get('start_frame', violation.get('frame_number', ''))}-{violation.get('end_frame', violation.get('frame_number', ''))}",
+                str(violation.get("artifact_clip_path") or "N/A"),
             ]
             for col_idx, value in enumerate(values):
                 self._violation_table.setItem(row_idx, col_idx, QTableWidgetItem(value))

@@ -30,7 +30,6 @@ def _sample_violation(frame_number: int, tracker_id: int = 1):
         position=(100, 200),
         bev_position=(10, 20),
         frame_number=frame_number,
-        confidence=0.91,
     )
 
 
@@ -50,6 +49,8 @@ def test_save_and_read_video_result(tmp_path):
     assert payload["video"]["video_path"] == video_path
     assert len(payload["violations"]) == 1
     assert payload["violations"][0]["violation_type"] == "WRONG_LANE"
+    assert payload["violations"][0]["start_frame"] == 50
+    assert payload["violations"][0]["end_frame"] == 50
 
 
 def test_overwrite_same_video_key(tmp_path):
@@ -100,6 +101,37 @@ def test_violation_time_sec_from_frame_and_fps(tmp_path):
     assert payload is not None
     violation = payload["violations"][0]
     assert abs(violation["violation_time_sec"] - 2.0) < 1e-6
+
+
+def test_save_and_read_violation_with_end_frame(tmp_path):
+    db_path = str(tmp_path / "violations.db")
+    store = ViolationStore(db_path=db_path)
+
+    video_path = str(tmp_path / "video_event.mp4")
+    store.save_video_result(
+        video_metadata=_sample_metadata(video_path, fps=20.0),
+        violations=[
+            {
+                "type": "WRONG_LANE",
+                "tracker_id": 10,
+                "class_id": 2,
+                "class_name": "car",
+                "position": (100, 200),
+                "bev_position": (10, 20),
+                "frame_number": 40,
+                "start_frame": 40,
+                "end_frame": 50,
+            }
+        ],
+    )
+
+    payload = store.get_video_result(video_path)
+    assert payload is not None
+    violation = payload["violations"][0]
+    assert violation["start_frame"] == 40
+    assert violation["end_frame"] == 50
+    assert abs(violation["violation_time_sec"] - 2.0) < 1e-6
+    assert abs(violation["end_time_sec"] - 2.5) < 1e-6
 
 
 def test_list_videos_with_started_and_finished_filters(tmp_path):
@@ -154,7 +186,6 @@ def test_get_violations_by_video_with_type_filter(tmp_path):
                 position=(120, 250),
                 bev_position=(11, 21),
                 frame_number=13,
-                confidence=0.88,
             ),
         ],
     )

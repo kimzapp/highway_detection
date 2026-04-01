@@ -38,8 +38,8 @@ class Violation:
     position: Tuple[int, int]      # Vị trí trên camera view
     bev_position: Tuple[int, int]  # Vị trí trên BEV
     frame_number: int
+    end_frame: Optional[int] = None
     timestamp: datetime = field(default_factory=datetime.now)
-    confidence: float = 1.0
     extra_info: Dict = field(default_factory=dict)
     
     def to_dict(self) -> Dict:
@@ -52,8 +52,9 @@ class Violation:
             'position': self.position,
             'bev_position': self.bev_position,
             'frame_number': self.frame_number,
+            'start_frame': self.frame_number,
+            'end_frame': self.end_frame,
             'timestamp': self.timestamp.isoformat(),
-            'confidence': self.confidence,
             'extra_info': self.extra_info
         }
 
@@ -74,6 +75,7 @@ class VehicleViolationState:
     is_currently_violating: bool = False
     current_violation_type: Optional[ViolationType] = None
     violation_start_frame: Optional[int] = None
+    active_violation_index: Optional[int] = None
     
     # Số frame liên tiếp trong trạng thái vi phạm (để tránh false positive)
     consecutive_violation_frames: int = 0
@@ -482,6 +484,7 @@ class ViolationDetector:
                         frame_number=state.violation_start_frame
                     )
                     state.violations.append(violation)
+                    state.active_violation_index = len(state.violations) - 1
                     self._violations_log.append(violation)
                     self._total_violations[violation_type] += 1
         else:
@@ -492,15 +495,35 @@ class ViolationDetector:
             if state.is_currently_violating:
                 # Kiểm tra đủ số frame để xác nhận hết vi phạm
                 if state.consecutive_normal_frames >= self.min_normal_frames:
+                    self._finalize_active_violation(
+                        state=state,
+                        end_frame=max(0, frame_number - self.min_normal_frames)
+                    )
                     state.is_currently_violating = False
                     state.current_violation_type = None
                     state.violation_start_frame = None
+                    state.active_violation_index = None
+
+    def _finalize_active_violation(self, state: VehicleViolationState, end_frame: int):
+        """Đóng event vi phạm đang active và ghi nhận frame kết thúc."""
+        if state.active_violation_index is None:
+            return
+
+        if state.active_violation_index < 0 or state.active_violation_index >= len(state.violations):
+            return
+
+        violation = state.violations[state.active_violation_index]
+        if violation.end_frame is None:
+            violation.end_frame = max(violation.frame_number, int(end_frame))
     
     def _cleanup_old_states(self, active_tracker_ids: Set[int]):
         """Xóa state của các xe không còn được track"""
         ids_to_remove = [tid for tid in self._vehicle_states.keys() 
                         if tid not in active_tracker_ids]
         for tid in ids_to_remove:
+            state = self._vehicle_states[tid]
+            if state.is_currently_violating:
+                self._finalize_active_violation(state, self._current_frame)
             del self._vehicle_states[tid]
     
     def get_vehicle_state(self, tracker_id: int) -> Optional[VehicleViolationState]:
@@ -526,6 +549,13 @@ class ViolationDetector:
     def get_violations_log(self) -> List[Violation]:
         """Lấy log tất cả các vi phạm đã ghi nhận"""
         return self._violations_log.copy()
+
+    def finalize_open_violations(self, end_frame: Optional[int] = None):
+        """Finalize các vi phạm còn mở khi kết thúc run."""
+        target_frame = self._current_frame if end_frame is None else int(end_frame)
+        for state in self._vehicle_states.values():
+            if state.is_currently_violating:
+                self._finalize_active_violation(state, target_frame)
     
     def reset(self):
         """Reset toàn bộ trạng thái"""

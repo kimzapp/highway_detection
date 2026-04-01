@@ -77,6 +77,10 @@ def test_invalid_vehicle_state_clears_after_normal_frames():
     current = detector.update(_single_detection(class_id=2, tracker_id=77), class_names, frame_number=4)
     assert current[77] == []
 
+    violation = detector.get_violations_log()[0]
+    assert violation.frame_number == 1
+    assert violation.end_frame == 2
+
 
 def test_wrong_lane_still_detects_for_valid_vehicle():
     detector = ViolationDetector(

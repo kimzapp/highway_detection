@@ -20,6 +20,8 @@ def _utc_now_iso() -> str:
 class ViolationStore:
     """Store and query processed-video metadata with violation events."""
 
+    ARTIFACTS_DIR_NAME = "violation_artifacts"
+
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
             project_root = Path(__file__).resolve().parent.parent
@@ -58,33 +60,152 @@ class ViolationStore:
                     finished_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-
-                CREATE TABLE IF NOT EXISTS violations (
-                    violation_id TEXT PRIMARY KEY,
-                    video_key TEXT NOT NULL,
-                    tracker_id INTEGER NOT NULL,
-                    violation_type TEXT NOT NULL,
-                    frame_number INTEGER NOT NULL,
-                    violation_time_sec REAL NOT NULL,
-                    class_id INTEGER NOT NULL,
-                    class_name TEXT NOT NULL,
-                    camera_x INTEGER NOT NULL,
-                    camera_y INTEGER NOT NULL,
-                    bev_x INTEGER,
-                    bev_y INTEGER,
-                    confidence REAL NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(video_key) REFERENCES videos(video_key) ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_violations_video_key
-                    ON violations(video_key);
-                CREATE INDEX IF NOT EXISTS idx_violations_type
-                    ON violations(violation_type);
-                CREATE INDEX IF NOT EXISTS idx_violations_frame
-                    ON violations(frame_number);
                 """
             )
+            self._create_violations_table(conn)
+            self._migrate_violations_table(conn)
+            self._ensure_violation_indexes(conn)
+
+    def _create_violations_table(self, conn: sqlite3.Connection):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS violations (
+                violation_id TEXT PRIMARY KEY,
+                video_key TEXT NOT NULL,
+                tracker_id INTEGER NOT NULL,
+                violation_type TEXT NOT NULL,
+                frame_number INTEGER NOT NULL,
+                start_frame INTEGER NOT NULL,
+                end_frame INTEGER NOT NULL,
+                violation_time_sec REAL NOT NULL,
+                end_time_sec REAL NOT NULL,
+                class_id INTEGER NOT NULL,
+                class_name TEXT NOT NULL,
+                camera_x INTEGER NOT NULL,
+                camera_y INTEGER NOT NULL,
+                bev_x INTEGER,
+                bev_y INTEGER,
+                artifact_clip_path TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(video_key) REFERENCES videos(video_key) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _ensure_violation_indexes(self, conn: sqlite3.Connection):
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_violations_video_key
+                ON violations(video_key);
+            CREATE INDEX IF NOT EXISTS idx_violations_type
+                ON violations(violation_type);
+            CREATE INDEX IF NOT EXISTS idx_violations_frame
+                ON violations(frame_number);
+            """
+        )
+
+    def _migrate_violations_table(self, conn: sqlite3.Connection):
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='violations'"
+        ).fetchone()
+        if table_exists is None:
+            return
+
+        columns_info = conn.execute("PRAGMA table_info(violations)").fetchall()
+        existing_columns = {str(row[1]) for row in columns_info}
+        required_columns = {
+            "violation_id",
+            "video_key",
+            "tracker_id",
+            "violation_type",
+            "frame_number",
+            "start_frame",
+            "end_frame",
+            "violation_time_sec",
+            "end_time_sec",
+            "class_id",
+            "class_name",
+            "camera_x",
+            "camera_y",
+            "bev_x",
+            "bev_y",
+            "artifact_clip_path",
+            "created_at",
+        }
+
+        needs_migration = ("confidence" in existing_columns) or (not required_columns.issubset(existing_columns))
+        if not needs_migration:
+            return
+
+        legacy_table = "violations_legacy"
+        conn.execute(f"DROP TABLE IF EXISTS {legacy_table}")
+        conn.execute(f"ALTER TABLE violations RENAME TO {legacy_table}")
+        self._create_violations_table(conn)
+
+        legacy_rows = conn.execute(f"SELECT * FROM {legacy_table}").fetchall()
+        migrated_rows = []
+        now_iso = _utc_now_iso()
+
+        for row in legacy_rows:
+            record = dict(row)
+            frame_number = int(record.get("frame_number") or 0)
+            start_frame = int(record.get("start_frame") or frame_number)
+            end_frame = int(record.get("end_frame") or frame_number)
+            if end_frame < start_frame:
+                end_frame = start_frame
+
+            violation_time_sec = float(record.get("violation_time_sec") or (start_frame if start_frame >= 0 else 0))
+            end_time_sec = float(record.get("end_time_sec") or violation_time_sec)
+
+            migrated_rows.append(
+                (
+                    str(record.get("violation_id") or ""),
+                    str(record.get("video_key") or ""),
+                    int(record.get("tracker_id") or -1),
+                    str(record.get("violation_type") or "UNKNOWN"),
+                    frame_number,
+                    start_frame,
+                    end_frame,
+                    violation_time_sec,
+                    end_time_sec,
+                    int(record.get("class_id") or -1),
+                    str(record.get("class_name") or "unknown"),
+                    int(record.get("camera_x") or -1),
+                    int(record.get("camera_y") or -1),
+                    int(record.get("bev_x") or -1),
+                    int(record.get("bev_y") or -1),
+                    record.get("artifact_clip_path"),
+                    str(record.get("created_at") or now_iso),
+                )
+            )
+
+        if migrated_rows:
+            conn.executemany(
+                """
+                INSERT INTO violations (
+                    violation_id,
+                    video_key,
+                    tracker_id,
+                    violation_type,
+                    frame_number,
+                    start_frame,
+                    end_frame,
+                    violation_time_sec,
+                    end_time_sec,
+                    class_id,
+                    class_name,
+                    camera_x,
+                    camera_y,
+                    bev_x,
+                    bev_y,
+                    artifact_clip_path,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                migrated_rows,
+            )
+
+        conn.execute(f"DROP TABLE {legacy_table}")
 
     def make_video_key(self, video_path: str) -> str:
         normalized_path = os.path.normcase(os.path.abspath(video_path))
@@ -129,34 +250,49 @@ class ViolationStore:
             item_dict = item.to_dict() if isinstance(item, Violation) else dict(item)
 
             frame_number = int(item_dict.get("frame_number", 0))
+            start_frame = int(item_dict.get("start_frame", frame_number))
+            end_frame_raw = item_dict.get("end_frame", frame_number)
+            end_frame = int(end_frame_raw if end_frame_raw is not None else frame_number)
+            if end_frame < start_frame:
+                end_frame = start_frame
+
             violation_type = str(item_dict.get("type", "UNKNOWN"))
             tracker_id = int(item_dict.get("tracker_id", -1))
             class_id = int(item_dict.get("class_id", -1))
             class_name = str(item_dict.get("class_name", "unknown"))
             position = tuple(item_dict.get("position") or (-1, -1))
             bev_position = tuple(item_dict.get("bev_position") or (-1, -1))
-            confidence = float(item_dict.get("confidence", 0.0))
+
+            violation_id = self.make_violation_id(
+                video_key=video_key,
+                tracker_id=tracker_id,
+                violation_type=violation_type,
+                frame_number=frame_number,
+            )
+
+            artifact_clip_path = item_dict.get("artifact_clip_path")
+            if not artifact_clip_path:
+                extra_info = item_dict.get("extra_info") or {}
+                artifact_clip_path = extra_info.get("artifact_clip_path")
 
             rows.append(
                 (
-                    self.make_violation_id(
-                        video_key=video_key,
-                        tracker_id=tracker_id,
-                        violation_type=violation_type,
-                        frame_number=frame_number,
-                    ),
+                    violation_id,
                     video_key,
                     tracker_id,
                     violation_type,
                     frame_number,
-                    frame_number / fps_safe,
+                    start_frame,
+                    end_frame,
+                    start_frame / fps_safe,
+                    end_frame / fps_safe,
                     class_id,
                     class_name,
                     int(position[0]),
                     int(position[1]),
                     int(bev_position[0]) if len(bev_position) > 0 else -1,
                     int(bev_position[1]) if len(bev_position) > 1 else -1,
-                    confidence,
+                    str(artifact_clip_path) if artifact_clip_path else None,
                     now_iso,
                 )
             )
@@ -218,16 +354,19 @@ class ViolationStore:
                         tracker_id,
                         violation_type,
                         frame_number,
+                        start_frame,
+                        end_frame,
                         violation_time_sec,
+                        end_time_sec,
                         class_id,
                         class_name,
                         camera_x,
                         camera_y,
                         bev_x,
                         bev_y,
-                        confidence,
+                        artifact_clip_path,
                         created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -329,8 +468,9 @@ class ViolationStore:
 
             violation_rows = conn.execute(
                 """
-                SELECT violation_id, tracker_id, violation_type, frame_number, violation_time_sec,
-                       class_id, class_name, camera_x, camera_y, bev_x, bev_y, confidence, created_at
+                  SELECT violation_id, tracker_id, violation_type, frame_number, start_frame, end_frame,
+                      violation_time_sec, end_time_sec, class_id, class_name,
+                      camera_x, camera_y, bev_x, bev_y, artifact_clip_path, created_at
                 FROM violations
                 WHERE video_key = ?
                 ORDER BY frame_number ASC, tracker_id ASC
@@ -348,8 +488,9 @@ class ViolationStore:
     ) -> List[Dict[str, Any]]:
         """Get violations for a single video with optional violation-type filter."""
         query = """
-            SELECT violation_id, tracker_id, violation_type, frame_number, violation_time_sec,
-                   class_id, class_name, camera_x, camera_y, bev_x, bev_y, confidence, created_at
+             SELECT violation_id, tracker_id, violation_type, frame_number, start_frame, end_frame,
+                 violation_time_sec, end_time_sec, class_id, class_name,
+                 camera_x, camera_y, bev_x, bev_y, artifact_clip_path, created_at
             FROM violations
             WHERE video_key = ?
         """
