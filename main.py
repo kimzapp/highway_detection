@@ -1,4 +1,7 @@
 from process.video import VideoProcessor
+from datetime import datetime
+
+from storage import ViolationStore
 
 
 def parse_args():
@@ -39,6 +42,12 @@ def parse_args():
     # Output options
     parser.add_argument("--save-video", action="store_true", help="Save output video")
     parser.add_argument("--display", action="store_true", help="Display video during processing")
+    parser.add_argument(
+        "--violations-db",
+        type=str,
+        default=None,
+        help="SQLite path to store video metadata and violations",
+    )
     
     # Road zone options
     parser.add_argument("--select-zone", action="store_true", default=True, 
@@ -87,6 +96,7 @@ def parse_args():
 
 def process_video_source(args):
     """Xử lý video file"""
+    started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     processor = VideoProcessor(args)
     
     # Set BEV options
@@ -98,11 +108,39 @@ def process_video_source(args):
     
     output_path = args.output if args.save_video else None
     
-    processor.process_video(
+    process_result = processor.process_video(
         video_path=args.input,
         output_path=output_path,
         display=args.display,
         select_road_zone=args.select_zone
+    )
+
+    finished_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    violations = []
+    if processor.violation_detector is not None:
+        violations = processor.violation_detector.get_violations_log()
+
+    store = ViolationStore(db_path=args.violations_db)
+    save_result = store.save_video_result(
+        video_metadata={
+            "video_path": args.input,
+            "fps": process_result.get("source_fps", 0),
+            "total_frames": process_result.get("total_frames", 0),
+            "width": process_result.get("source_width", 0),
+            "height": process_result.get("source_height", 0),
+            "processing_config": vars(args),
+            "output_video_path": process_result.get("output_path"),
+            "started_at": started_at,
+            "finished_at": finished_at,
+        },
+        violations=violations,
+    )
+    print(
+        "Saved violations metadata: "
+        f"video_key={save_result['video_key']} "
+        f"violations={save_result['violations_saved']} "
+        f"db={save_result['db_path']}"
     )
 
 

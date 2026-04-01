@@ -13,4 +13,4 @@ release/installer
 release/release_info.txt
 release/VERSION
 release/*.log
-asdfasf
+*.db

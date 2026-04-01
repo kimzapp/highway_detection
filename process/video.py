@@ -1115,6 +1115,9 @@ class VideoProcessor:
             "frames_processed": frame_count,
             "frames_inferred": inferred_frame_count,
             "total_frames": total_frames,
+            "source_fps": fps,
+            "source_width": width,
+            "source_height": height,
             "stopped_by_user": stopped_by_user,
             "output_path": output_path,
             "fps_stats": self.fps_counter.get_stats()

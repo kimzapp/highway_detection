@@ -8,6 +8,7 @@ from .source_selector import SourceSelector
 from .config_panel import ConfigPanel
 from .video_preview import VideoPreviewWidget
 from .zone_selector_widget import ZoneSelectorWidget
+from .violation_history_page import ViolationHistoryPage
 from .styles import apply_stylesheet, GLOBAL_STYLESHEET
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     'ConfigPanel',
     'VideoPreviewWidget',
     'ZoneSelectorWidget',
+    'ViolationHistoryPage',
     'apply_stylesheet',
     'GLOBAL_STYLESHEET'
 ]

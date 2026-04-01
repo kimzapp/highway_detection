@@ -6,6 +6,7 @@ Cửa sổ chính của ứng dụng Highway Detection GUI
 import os
 import sys
 import time
+from datetime import datetime
 import cv2
 import numpy as np
 from typing import Optional, List
@@ -23,8 +24,10 @@ from PyQt5.QtGui import QImage, QPixmap
 from .source_selector import SourceSelector, SourceConfig
 from .config_panel import ConfigPanel, ProcessingConfig
 from .zone_selector_widget import ZoneSelectorWidget
+from .violation_history_page import ViolationHistoryPage
 from .styles import apply_stylesheet
 from app_version import get_display_version
+from storage import ViolationStore
 
 
 class AppState(Enum):
@@ -33,6 +36,7 @@ class AppState(Enum):
     CONFIG = auto()
     ZONE_SELECTION = auto()
     PROCESSING = auto()
+    HISTORY = auto()
     COMPLETED = auto()
 
 
@@ -64,11 +68,13 @@ class ProcessingThread(QThread):
         self._processor = None
         self._preview_max_fps = 12.0
         self._preview_interval_s = 1.0 / self._preview_max_fps
+        self._run_summary = {}
         
     def run(self):
         """Chạy xử lý video"""
         try:
             from process.video import VideoProcessor, AsyncVideoWriter
+            run_started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             
             # Create args-like object
             args = self._create_args()
@@ -91,6 +97,7 @@ class ProcessingThread(QThread):
                 output_path=output_path,
                 preset_zones=self._config.zones if self._config.zones else None,
                 writer_class=AsyncVideoWriter,
+                run_started_at=run_started_at,
             )
             
             self.processing_completed.emit()
@@ -100,11 +107,21 @@ class ProcessingThread(QThread):
             traceback.print_exc()
             self.error_occurred.emit(str(e))
     
-    def _process_video_for_gui(self, video_path: str, output_path: Optional[str], preset_zones, writer_class=None):
+    def _process_video_for_gui(
+        self,
+        video_path: str,
+        output_path: Optional[str],
+        preset_zones,
+        writer_class=None,
+        run_started_at: Optional[str] = None,
+    ):
         """Xử lý video và emit frame về GUI thay vì dùng cv2.imshow"""
         from lane_mapping.road_zone import MultiRoadZoneOverlay
         from lane_mapping.bird_eye_view import create_combined_view
         from violations import ViolationDetector, ViolationVisualizer, ViolationType
+
+        if run_started_at is None:
+            run_started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         
         processor = self._processor
         
@@ -395,6 +412,26 @@ class ProcessingThread(QThread):
             cap.release()
             if async_writer:
                 async_writer.close()
+
+            run_finished_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            violations_log = []
+            if processor.violation_detector is not None:
+                violations_log = processor.violation_detector.get_violations_log()
+
+            self._run_summary = {
+                "video_path": video_path,
+                "output_path": output_path,
+                "fps": fps,
+                "total_frames": total_frames,
+                "width": width,
+                "height": height,
+                "frames_processed": frame_count,
+                "frames_inferred": inferred_frame_count,
+                "started_at": run_started_at,
+                "finished_at": run_finished_at,
+                "violations": violations_log,
+            }
+
             print(f"Processed {frame_count} frames")
             print(f"Inference ran on {inferred_frame_count} frames (skip={processor.skip_frames})")
             if async_writer and async_writer.dropped_frames > 0:
@@ -410,6 +447,10 @@ class ProcessingThread(QThread):
                     f"ui={timing_totals['ui_emit'] / frame_count * 1000.0:.2f}ms, "
                     f"write={timing_totals['write'] / frame_count * 1000.0:.2f}ms"
                 )
+
+    def get_run_summary(self):
+        """Lấy metadata của lần xử lý gần nhất."""
+        return dict(self._run_summary)
             
     def _create_args(self):
         """Tạo object args từ config"""
@@ -481,6 +522,7 @@ class MainWindow(QMainWindow):
     2. Config - Cấu hình tham số
     3. Zone Selection - Chọn valid zones
     4. Processing - Xử lý video
+    5. History - Xem metadata và sai phạm đã lưu
     """
     
     def __init__(self):
@@ -489,8 +531,10 @@ class MainWindow(QMainWindow):
         self._app_config = AppConfig()
         self._current_state = AppState.SOURCE_SELECTION
         self._processing_thread: Optional[ProcessingThread] = None
+        self._stop_requested = False
         self._logo_original_pixmap: Optional[QPixmap] = None
         self._logo_label: Optional[QLabel] = None
+        self._violation_store = ViolationStore()
         
         self._setup_ui()
         self._connect_signals()
@@ -536,6 +580,10 @@ class MainWindow(QMainWindow):
         # Page 4: Processing
         self._processing_page = self._create_processing_page()
         self._stacked_widget.addWidget(self._processing_page)
+
+        # Page 5: Violation history
+        self._history_page = ViolationHistoryPage()
+        self._stacked_widget.addWidget(self._history_page)
         
         main_layout.addWidget(self._stacked_widget, 1)
         
@@ -655,7 +703,8 @@ class MainWindow(QMainWindow):
             ("1. Chọn Nguồn", AppState.SOURCE_SELECTION),
             ("2. Cấu Hình", AppState.CONFIG),
             ("3. Chọn Zone", AppState.ZONE_SELECTION),
-            ("4. Xử Lý", AppState.PROCESSING)
+            ("4. Xử Lý", AppState.PROCESSING),
+            ("5. Lịch Sử", AppState.HISTORY),
         ]
         
         for i, (text, state) in enumerate(steps):
@@ -779,6 +828,7 @@ class MainWindow(QMainWindow):
         
         # Processing
         self._stop_btn.clicked.connect(self._stop_processing)
+        self._history_page.back_to_home_requested.connect(self._go_home_after_history)
         
     def _update_state(self, new_state: AppState):
         """Cập nhật trạng thái ứng dụng"""
@@ -790,6 +840,7 @@ class MainWindow(QMainWindow):
             AppState.CONFIG: 1,
             AppState.ZONE_SELECTION: 2,
             AppState.PROCESSING: 3,
+            AppState.HISTORY: 4,
         }
         
         if new_state in state_to_page:
@@ -804,6 +855,7 @@ class MainWindow(QMainWindow):
             AppState.CONFIG: "Cấu hình các tham số xử lý",
             AppState.ZONE_SELECTION: "Chọn vùng đường hợp lệ",
             AppState.PROCESSING: "Đang xử lý video...",
+            AppState.HISTORY: "Lịch sử sai phạm đã được lưu",
             AppState.COMPLETED: "Xử lý hoàn tất!"
         }
         self._status_bar.showMessage(state_messages.get(new_state, ""))
@@ -895,6 +947,7 @@ class MainWindow(QMainWindow):
         
     def _start_processing(self):
         """Bắt đầu xử lý video"""
+        self._stop_requested = False
         self._update_state(AppState.PROCESSING)
         
         # Reset video display
@@ -909,25 +962,26 @@ class MainWindow(QMainWindow):
         self._processing_thread.frame_processed.connect(self._on_frame_processed)
         self._processing_thread.processing_completed.connect(self._on_processing_completed)
         self._processing_thread.error_occurred.connect(self._on_processing_error)
+        self._stop_btn.setEnabled(True)
         self._processing_thread.start()
         
     def _stop_processing(self):
         """Dừng xử lý"""
         if self._processing_thread:
+            self._stop_requested = True
+            self._stop_btn.setEnabled(False)
+            self._processing_label.setText("Đang dừng xử lý và lưu lịch sử...")
+            self._status_bar.showMessage("Đang dừng xử lý...")
             self._processing_thread.stop()
             self._processing_thread.wait()
-            self._processing_thread = None
-        
-        # Hiển thị thông báo
-        QMessageBox.information(
-            self,
-            "Đã Dừng",
-            "Quá trình xử lý video đã được dừng lại."
-        )
-        
-        # Reset config và redirect về màn hình chính
+
+    def _go_home_after_history(self):
+        """Reset state sau khi người dùng xem lịch sử."""
         self._app_config = AppConfig()
-        self._status_bar.showMessage("Đã dừng xử lý - Quay về màn hình chính")
+        self._processing_thread = None
+        self._stop_requested = False
+        self._stop_btn.setEnabled(True)
+        self._status_bar.showMessage("Sẵn sàng")
         self._update_state(AppState.SOURCE_SELECTION)
         
     def _on_progress_updated(self, current: int, total: int):
@@ -976,20 +1030,83 @@ class MainWindow(QMainWindow):
             
     def _on_processing_completed(self):
         """Xử lý khi hoàn thành"""
-        self._status_bar.showMessage("Xử lý hoàn tất!")
-        self._processing_label.setText("✅ Xử lý hoàn tất!")
-        
-        # Hiển thị thông báo hoàn thành
-        QMessageBox.information(
-            self,
-            "Hoàn Thành",
-            "Xử lý video đã hoàn tất!\nBạn có thể chọn video khác để xử lý."
-        )
-        
-        # Reset config và tự động redirect về màn hình chính
-        self._app_config = AppConfig()
-        self._status_bar.showMessage("Xử lý hoàn tất - Quay về màn hình chính")
-        self._update_state(AppState.SOURCE_SELECTION)
+        was_stopped = self._stop_requested
+        self._stop_btn.setEnabled(False)
+
+        if was_stopped:
+            self._status_bar.showMessage("Đã dừng xử lý. Đang lưu lịch sử sai phạm...")
+            self._processing_label.setText("⏹️ Đã dừng xử lý - Đang lưu lịch sử...")
+        else:
+            self._status_bar.showMessage("Xử lý hoàn tất! Đang lưu lịch sử sai phạm...")
+            self._processing_label.setText("✅ Xử lý hoàn tất!")
+
+        if self._processing_thread is None:
+            QMessageBox.warning(self, "Cảnh báo", "Không tìm thấy thông tin luồng xử lý để lưu lịch sử.")
+            self._update_state(AppState.SOURCE_SELECTION)
+            return
+
+        run_summary = self._processing_thread.get_run_summary()
+        source_path = ""
+        if self._app_config.source_config is not None:
+            source_path = self._app_config.source_config.path
+
+        if not source_path:
+            source_path = run_summary.get("video_path", "")
+
+        if not source_path:
+            QMessageBox.critical(self, "Lỗi Lưu Lịch Sử", "Thiếu đường dẫn video để lưu metadata sai phạm.")
+            self._update_state(AppState.SOURCE_SELECTION)
+            self._processing_thread = None
+            return
+
+        processing_cfg = self._app_config.processing_config.to_dict() if self._app_config.processing_config else {}
+        violations = run_summary.get("violations", [])
+
+        try:
+            save_result = self._violation_store.save_video_result(
+                video_metadata={
+                    "video_path": source_path,
+                    "fps": run_summary.get("fps", 0),
+                    "total_frames": run_summary.get("total_frames", 0),
+                    "width": run_summary.get("width", 0),
+                    "height": run_summary.get("height", 0),
+                    "processing_config": processing_cfg,
+                    "output_video_path": run_summary.get("output_path"),
+                    "started_at": run_summary.get("started_at"),
+                    "finished_at": run_summary.get("finished_at"),
+                },
+                violations=violations,
+            )
+
+            history_payload = self._violation_store.get_video_result(source_path)
+            if history_payload is None:
+                raise RuntimeError("Không đọc được dữ liệu lịch sử vừa lưu.")
+
+            self._history_page.set_data(
+                history_payload.get("video", {}),
+                history_payload.get("violations", []),
+            )
+            if was_stopped:
+                self._status_bar.showMessage(
+                    f"Đã dừng và lưu {save_result['violations_saved']} sai phạm vào {save_result['db_path']}"
+                )
+            else:
+                self._status_bar.showMessage(
+                    f"Đã lưu {save_result['violations_saved']} sai phạm vào {save_result['db_path']}"
+                )
+            self._update_state(AppState.HISTORY)
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Lỗi Lưu Lịch Sử",
+                f"Không thể lưu hoặc tải lịch sử sai phạm:\n{exc}",
+            )
+            self._update_state(AppState.SOURCE_SELECTION)
+
+        finally:
+            self._stop_requested = False
+            self._processing_thread = None
             
     def _on_processing_error(self, error_msg: str):
         """Xử lý khi có lỗi"""
@@ -1001,6 +1118,9 @@ class MainWindow(QMainWindow):
         
         # Reset config và redirect về màn hình chính
         self._app_config = AppConfig()
+        self._processing_thread = None
+        self._stop_requested = False
+        self._stop_btn.setEnabled(True)
         self._status_bar.showMessage("Lỗi xử lý - Quay về màn hình chính")
         self._update_state(AppState.SOURCE_SELECTION)
         
