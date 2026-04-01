@@ -100,3 +100,72 @@ def test_violation_time_sec_from_frame_and_fps(tmp_path):
     assert payload is not None
     violation = payload["violations"][0]
     assert abs(violation["violation_time_sec"] - 2.0) < 1e-6
+
+
+def test_list_videos_with_started_and_finished_filters(tmp_path):
+    db_path = str(tmp_path / "violations.db")
+    store = ViolationStore(db_path=db_path)
+
+    video_a = str(tmp_path / "video_a.mp4")
+    video_b = str(tmp_path / "video_b.mp4")
+
+    meta_a = _sample_metadata(video_a, fps=30.0)
+    meta_a["started_at"] = "2026-03-01T10:00:00Z"
+    meta_a["finished_at"] = "2026-03-01T10:10:00Z"
+
+    meta_b = _sample_metadata(video_b, fps=30.0)
+    meta_b["started_at"] = "2026-04-01T11:00:00Z"
+    meta_b["finished_at"] = "2026-04-01T11:12:00Z"
+
+    store.save_video_result(video_metadata=meta_a, violations=[_sample_violation(frame_number=12)])
+    store.save_video_result(video_metadata=meta_b, violations=[_sample_violation(frame_number=20)])
+
+    result_started = store.list_videos(
+        started_from="2026-04-01T00:00:00Z",
+        started_to="2026-04-02T00:00:00Z",
+    )
+    assert len(result_started) == 1
+    assert result_started[0]["file_name"] == "video_b.mp4"
+
+    result_finished = store.list_videos(
+        finished_from="2026-03-01T00:00:00Z",
+        finished_to="2026-03-02T00:00:00Z",
+    )
+    assert len(result_finished) == 1
+    assert result_finished[0]["file_name"] == "video_a.mp4"
+
+
+def test_get_violations_by_video_with_type_filter(tmp_path):
+    db_path = str(tmp_path / "violations.db")
+    store = ViolationStore(db_path=db_path)
+
+    video_path = str(tmp_path / "video_types.mp4")
+    video_key = store.make_video_key(video_path)
+
+    store.save_video_result(
+        video_metadata=_sample_metadata(video_path, fps=30.0),
+        violations=[
+            _sample_violation(frame_number=12, tracker_id=1),
+            Violation(
+                violation_type=ViolationType.INVALID_VEHICLE,
+                tracker_id=2,
+                class_id=0,
+                class_name="person",
+                position=(120, 250),
+                bev_position=(11, 21),
+                frame_number=13,
+                confidence=0.88,
+            ),
+        ],
+    )
+
+    all_rows = store.get_violations_by_video(video_key)
+    assert len(all_rows) == 2
+
+    wrong_lane_rows = store.get_violations_by_video(video_key, violation_type="WRONG_LANE")
+    assert len(wrong_lane_rows) == 1
+    assert wrong_lane_rows[0]["violation_type"] == "WRONG_LANE"
+
+    invalid_vehicle_rows = store.get_violations_by_video(video_key, violation_type="INVALID_VEHICLE")
+    assert len(invalid_vehicle_rows) == 1
+    assert invalid_vehicle_rows[0]["violation_type"] == "INVALID_VEHICLE"

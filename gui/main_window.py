@@ -16,7 +16,8 @@ from enum import Enum, auto
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QLabel, QPushButton, QProgressBar,
-    QStatusBar, QMessageBox, QApplication, QFrame, QSizePolicy
+    QStatusBar, QMessageBox, QApplication, QFrame, QSizePolicy,
+    QAction, QToolBar
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
@@ -25,6 +26,7 @@ from .source_selector import SourceSelector, SourceConfig
 from .config_panel import ConfigPanel, ProcessingConfig
 from .zone_selector_widget import ZoneSelectorWidget
 from .violation_history_page import ViolationHistoryPage
+from .history_database_page import HistoryDatabasePage
 from .styles import apply_stylesheet
 from app_version import get_display_version
 from storage import ViolationStore
@@ -535,6 +537,7 @@ class MainWindow(QMainWindow):
         self._logo_original_pixmap: Optional[QPixmap] = None
         self._logo_label: Optional[QLabel] = None
         self._violation_store = ViolationStore()
+        self._state_before_database = AppState.SOURCE_SELECTION
         
         self._setup_ui()
         self._connect_signals()
@@ -557,6 +560,8 @@ class MainWindow(QMainWindow):
         # Header
         header = self._create_header()
         main_layout.addWidget(header)
+
+        self._setup_global_navigation()
         
         # Progress indicator
         self._progress_widget = self._create_progress_indicator()
@@ -584,6 +589,10 @@ class MainWindow(QMainWindow):
         # Page 5: Violation history
         self._history_page = ViolationHistoryPage()
         self._stacked_widget.addWidget(self._history_page)
+
+        # Page 6: Database history browser
+        self._history_database_page = HistoryDatabasePage(self._violation_store)
+        self._stacked_widget.addWidget(self._history_database_page)
         
         main_layout.addWidget(self._stacked_widget, 1)
         
@@ -829,6 +838,52 @@ class MainWindow(QMainWindow):
         # Processing
         self._stop_btn.clicked.connect(self._stop_processing)
         self._history_page.back_to_home_requested.connect(self._go_home_after_history)
+
+    def _setup_global_navigation(self):
+        """Tạo menu/toolbar luôn hiển thị để truy cập trang database lịch sử."""
+        data_menu = self.menuBar().addMenu("Dữ liệu")
+
+        self._open_database_action = QAction("Mở Database Lịch Sử", self)
+        self._open_database_action.triggered.connect(self._open_database_history_page)
+        data_menu.addAction(self._open_database_action)
+
+        self._return_flow_action = QAction("Quay Lại Luồng Hiện Tại", self)
+        self._return_flow_action.setEnabled(False)
+        self._return_flow_action.triggered.connect(self._return_from_database_history_page)
+        data_menu.addAction(self._return_flow_action)
+
+        toolbar = QToolBar("Data Toolbar", self)
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.addAction(self._open_database_action)
+        toolbar.addAction(self._return_flow_action)
+        self.addToolBar(Qt.TopToolBarArea, toolbar)
+
+    def _open_database_history_page(self):
+        """Mở trang duyệt toàn bộ database lịch sử vi phạm."""
+        if self._current_state == AppState.PROCESSING:
+            QMessageBox.information(
+                self,
+                "Đang Xử Lý",
+                "Không thể mở trang database khi video đang xử lý.",
+            )
+            return
+
+        self._state_before_database = self._current_state
+        self._history_database_page.refresh_data()
+        self._stacked_widget.setCurrentWidget(self._history_database_page)
+        self._open_database_action.setEnabled(False)
+        self._return_flow_action.setEnabled(True)
+        self._status_bar.showMessage("Đang xem database lịch sử vi phạm")
+
+    def _return_from_database_history_page(self):
+        """Quay lại trang đang làm việc trước khi mở database history."""
+        if self._stacked_widget.currentWidget() is not self._history_database_page:
+            return
+
+        self._open_database_action.setEnabled(True)
+        self._return_flow_action.setEnabled(False)
+        self._update_state(self._state_before_database)
         
     def _update_state(self, new_state: AppState):
         """Cập nhật trạng thái ứng dụng"""
@@ -845,6 +900,12 @@ class MainWindow(QMainWindow):
         
         if new_state in state_to_page:
             self._stacked_widget.setCurrentIndex(state_to_page[new_state])
+
+        if new_state != AppState.PROCESSING:
+            self._open_database_action.setEnabled(True)
+        else:
+            self._open_database_action.setEnabled(False)
+        self._return_flow_action.setEnabled(False)
             
         # Update progress indicator
         self._update_progress_indicator()
