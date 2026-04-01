@@ -8,7 +8,7 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from violations import Violation
 
@@ -243,6 +243,77 @@ class ViolationStore:
     def get_video_result(self, video_path: str) -> Optional[Dict[str, Any]]:
         video_key = self.make_video_key(video_path)
 
+        return self.get_video_result_by_key(video_key)
+
+    def list_videos(
+        self,
+        *,
+        started_from: Optional[str] = None,
+        started_to: Optional[str] = None,
+        finished_from: Optional[str] = None,
+        finished_to: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List all processed videos with violation counters and optional time filters."""
+        where_parts = []
+        params: List[Any] = []
+
+        if started_from:
+            where_parts.append("v.started_at >= ?")
+            params.append(started_from)
+        if started_to:
+            where_parts.append("v.started_at <= ?")
+            params.append(started_to)
+        if finished_from:
+            where_parts.append("v.finished_at >= ?")
+            params.append(finished_from)
+        if finished_to:
+            where_parts.append("v.finished_at <= ?")
+            params.append(finished_to)
+
+        where_clause = ""
+        if where_parts:
+            where_clause = "WHERE " + " AND ".join(where_parts)
+
+        query = f"""
+            SELECT
+                v.video_key,
+                v.video_path,
+                v.file_name,
+                v.fps,
+                v.total_frames,
+                v.width,
+                v.height,
+                v.output_video_path,
+                v.started_at,
+                v.finished_at,
+                v.updated_at,
+                COUNT(vi.violation_id) AS violation_count
+            FROM videos v
+            LEFT JOIN violations vi ON vi.video_key = v.video_key
+            {where_clause}
+            GROUP BY
+                v.video_key,
+                v.video_path,
+                v.file_name,
+                v.fps,
+                v.total_frames,
+                v.width,
+                v.height,
+                v.output_video_path,
+                v.started_at,
+                v.finished_at,
+                v.updated_at
+            ORDER BY v.started_at DESC, v.updated_at DESC
+        """
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def get_video_result_by_key(self, video_key: str) -> Optional[Dict[str, Any]]:
+        """Read video metadata and all violations by stable video key."""
+
         with self._connect() as conn:
             video_row = conn.execute(
                 """
@@ -266,6 +337,46 @@ class ViolationStore:
                 """,
                 (video_key,),
             ).fetchall()
+
+        return self._build_video_payload(video_row, violation_rows)
+
+    def get_violations_by_video(
+        self,
+        video_key: str,
+        *,
+        violation_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get violations for a single video with optional violation-type filter."""
+        query = """
+            SELECT violation_id, tracker_id, violation_type, frame_number, violation_time_sec,
+                   class_id, class_name, camera_x, camera_y, bev_x, bev_y, confidence, created_at
+            FROM violations
+            WHERE video_key = ?
+        """
+        params: List[Any] = [video_key]
+        if violation_type and violation_type != "Tất cả":
+            query += " AND violation_type = ?"
+            params.append(violation_type)
+        query += " ORDER BY frame_number ASC, tracker_id ASC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        violations: List[Dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            record["position"] = [record.pop("camera_x"), record.pop("camera_y")]
+            record["bev_position"] = [record.pop("bev_x"), record.pop("bev_y")]
+            violations.append(record)
+        return violations
+
+    def _build_video_payload(
+        self,
+        video_row: Optional[sqlite3.Row],
+        violation_rows: Iterable[sqlite3.Row],
+    ) -> Optional[Dict[str, Any]]:
+        if video_row is None:
+            return None
 
         video = dict(video_row)
         video["processing_config"] = json.loads(video.pop("processing_config_json"))
