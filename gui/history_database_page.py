@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QDateTime
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDateTimeEdit,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -19,11 +22,14 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from gui.video_preview import VideoPreviewWidget
 from storage import ViolationStore
 
 
 class HistoryDatabasePage(QWidget):
     """Browse entire violation database by video and inspect violation details."""
+
+    EVIDENCE_CLIP_COLUMN = 6
 
     def __init__(self, store: ViolationStore, parent=None):
         super().__init__(parent)
@@ -162,6 +168,7 @@ class HistoryDatabasePage(QWidget):
         self._violation_table.setAlternatingRowColors(True)
         self._violation_table.verticalHeader().setVisible(False)
         self._violation_table.horizontalHeader().setStretchLastSection(True)
+        self._violation_table.itemDoubleClicked.connect(self._on_violation_cell_double_clicked)
         right_layout.addWidget(self._violation_table, 1)
 
         self._violation_count_label = QLabel("Tổng vi phạm: 0")
@@ -297,6 +304,62 @@ class HistoryDatabasePage(QWidget):
             ]
             for col_idx, value in enumerate(values):
                 self._violation_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
+
+    def _on_violation_cell_double_clicked(self, item: QTableWidgetItem):
+        if item is None:
+            return
+
+        if item.column() != self.EVIDENCE_CLIP_COLUMN:
+            return
+
+        raw_path = str(item.text() or "").strip()
+        if not raw_path or raw_path.upper() == "N/A":
+            return
+
+        artifact_path = os.path.abspath(raw_path)
+        if not os.path.isfile(artifact_path):
+            QMessageBox.warning(
+                self,
+                "Không tìm thấy clip",
+                f"Không tìm thấy clip vi phạm tại:\n{artifact_path}",
+            )
+            return
+
+        self._open_artifact_clip_dialog(artifact_path)
+
+    def _open_artifact_clip_dialog(self, artifact_path: str):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Xem lại clip vi phạm")
+        dialog.setModal(True)
+        dialog.resize(980, 640)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        path_label = QLabel(f"Artifact: {artifact_path}")
+        path_label.setWordWrap(True)
+        path_label.setStyleSheet("color: #444;")
+        layout.addWidget(path_label)
+
+        viewer = VideoPreviewWidget(dialog)
+        layout.addWidget(viewer, 1)
+
+        loaded = viewer.load_video(artifact_path)
+        if not loaded:
+            viewer.release()
+            QMessageBox.warning(
+                self,
+                "Không thể mở clip",
+                f"Không thể phát clip vi phạm:\n{artifact_path}",
+            )
+            dialog.deleteLater()
+            return
+
+        try:
+            dialog.exec_()
+        finally:
+            viewer.release()
 
     @staticmethod
     def _qdatetime_to_iso(value: QDateTime) -> str:
