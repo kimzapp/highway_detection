@@ -88,3 +88,92 @@ def test_async_artifact_writer_creates_clip_for_event(tmp_path):
     assert os.path.exists(clip_path)
     assert os.path.getsize(clip_path) > 0
     assert get_video_artifact_dir(video_path, artifact_root=artifact_root) in clip_path
+
+
+def test_async_artifact_writer_many_events_have_paths(tmp_path):
+    video_path = str(tmp_path / "video_many.mp4")
+    open(video_path, "wb").close()
+
+    artifact_root = str(tmp_path / "artifacts")
+    cleanup_video_artifacts(video_path, artifact_root=artifact_root)
+
+    writer = AsyncViolationArtifactWriter(
+        video_path=video_path,
+        fps=20.0,
+        artifact_root=artifact_root,
+        max_queue_size=1200,
+        max_buffer_frames=80,
+    )
+    writer.start()
+
+    violation_ids = [f"viol_{idx:03d}" for idx in range(120)]
+    for idx, violation_id in enumerate(violation_ids):
+        writer.on_violation_started(
+            {
+                "violation_id": violation_id,
+                "tracker_id": idx + 1,
+                "class_name": "car",
+                "violation_type": "WRONG_LANE",
+                "start_frame": 0,
+                "fps": 20.0,
+            }
+        )
+
+    for frame_number in range(4):
+        frame = np.zeros((48, 80, 3), dtype=np.uint8)
+        writer.enqueue_frame(frame_number, frame, [])
+
+    for violation_id in violation_ids:
+        writer.on_violation_ended({"violation_id": violation_id, "end_frame": 3})
+
+    summary = writer.close()
+    artifact_paths = summary.get("artifact_paths") or {}
+
+    assert len(artifact_paths) == len(violation_ids)
+    for violation_id in violation_ids:
+        clip_path = artifact_paths.get(violation_id)
+        assert clip_path is not None
+        assert os.path.exists(clip_path)
+
+
+def test_async_artifact_writer_keeps_critical_commands_under_pressure(tmp_path):
+    video_path = str(tmp_path / "video_pressure.mp4")
+    open(video_path, "wb").close()
+
+    artifact_root = str(tmp_path / "artifacts")
+    cleanup_video_artifacts(video_path, artifact_root=artifact_root)
+
+    writer = AsyncViolationArtifactWriter(
+        video_path=video_path,
+        fps=25.0,
+        artifact_root=artifact_root,
+        max_queue_size=8,
+        max_buffer_frames=64,
+    )
+    writer.start()
+
+    violation_id = "viol_pressure"
+    writer.on_violation_started(
+        {
+            "violation_id": violation_id,
+            "tracker_id": 7,
+            "class_name": "car",
+            "violation_type": "WRONG_LANE",
+            "start_frame": 0,
+            "fps": 25.0,
+        }
+    )
+
+    for frame_number in range(160):
+        frame = np.zeros((80, 128, 3), dtype=np.uint8)
+        writer.enqueue_frame(frame_number, frame, [])
+
+    writer.on_violation_ended({"violation_id": violation_id, "end_frame": 30})
+    summary = writer.close()
+
+    artifact_paths = summary.get("artifact_paths") or {}
+    dropped_by_type = summary.get("dropped_messages_by_type") or {}
+
+    assert artifact_paths.get(violation_id)
+    assert dropped_by_type.get("violation_started", 0) == 0
+    assert dropped_by_type.get("violation_ended", 0) == 0

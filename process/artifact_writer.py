@@ -7,6 +7,7 @@ import multiprocessing as mp
 import os
 import queue
 import shutil
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -340,7 +341,7 @@ class AsyncViolationArtifactWriter:
         fps: float,
         artifact_root: Optional[str] = None,
         valid_zone_polygons: Optional[List[Any]] = None,
-        max_queue_size: int = 180,
+        max_queue_size: int = 800,
         max_buffer_frames: int = 320,
     ):
         self.video_path = video_path
@@ -371,6 +372,11 @@ class AsyncViolationArtifactWriter:
         self._closed = False
         self._error: Optional[str] = None
         self._dropped_messages = 0
+        self._dropped_messages_by_type: Dict[str, int] = {}
+
+    @staticmethod
+    def _is_critical_command(command_type: str) -> bool:
+        return command_type in {"violation_started", "violation_ended", "shutdown"}
 
     @staticmethod
     def _normalize_zone_polygons(valid_zone_polygons: Optional[List[Any]]) -> List[List[List[int]]]:
@@ -390,6 +396,10 @@ class AsyncViolationArtifactWriter:
     def dropped_messages(self) -> int:
         return self._dropped_messages
 
+    @property
+    def dropped_messages_by_type(self) -> Dict[str, int]:
+        return dict(self._dropped_messages_by_type)
+
     def start(self, timeout_s: float = 10.0):
         if self._started:
             return
@@ -407,23 +417,41 @@ class AsyncViolationArtifactWriter:
             self._error = status.get("message", "Artifact writer failed to start")
             raise RuntimeError(self._error)
 
-    def _put_command(self, command: Dict[str, Any]):
+    def _put_command(
+        self,
+        command: Dict[str, Any],
+        *,
+        timeout_s: float = 0.2,
+        critical_retries: int = 15,
+    ) -> bool:
         self._poll_status_queue()
         if self._error is not None:
             raise RuntimeError(self._error)
 
-        try:
-            self._command_queue.put_nowait(command)
-        except queue.Full:
-            try:
-                self._command_queue.get_nowait()
-            except queue.Empty:
-                pass
+        cmd_type = str(command.get("type") or "unknown")
+        is_critical = self._is_critical_command(cmd_type)
 
-            try:
-                self._command_queue.put_nowait(command)
-            except queue.Full:
-                self._dropped_messages += 1
+        if is_critical:
+            for _ in range(max(1, int(critical_retries))):
+                try:
+                    self._command_queue.put(command, timeout=timeout_s)
+                    return True
+                except queue.Full:
+                    self._poll_status_queue()
+                    if self._error is not None:
+                        raise RuntimeError(self._error)
+                    if not self._process.is_alive():
+                        raise RuntimeError("Artifact writer process stopped unexpectedly")
+
+            raise RuntimeError(f"Artifact command queue saturated while enqueueing critical command: {cmd_type}")
+
+        try:
+            self._command_queue.put(command, timeout=timeout_s)
+            return True
+        except queue.Full:
+            self._dropped_messages += 1
+            self._dropped_messages_by_type[cmd_type] = self._dropped_messages_by_type.get(cmd_type, 0) + 1
+            return False
 
     def enqueue_frame(self, frame_number: int, frame: np.ndarray, detections: List[Dict[str, Any]]):
         if self._closed or not self._started:
@@ -464,23 +492,37 @@ class AsyncViolationArtifactWriter:
         }
         self._put_command(payload)
 
-    def close(self, timeout_s: float = 40.0) -> Dict[str, Any]:
+    def close(self, timeout_s: float = 12.0) -> Dict[str, Any]:
         if self._closed:
-            return {"artifact_paths": {}, "dropped_messages": self._dropped_messages}
+            return {
+                "artifact_paths": {},
+                "dropped_messages": self._dropped_messages,
+                "dropped_messages_by_type": self.dropped_messages_by_type,
+            }
         self._closed = True
+
+        done_payload: Optional[Dict[str, Any]] = None
 
         if self._started:
             try:
-                self._command_queue.put({"type": "shutdown"}, timeout=2.0)
-            except queue.Full:
+                self._put_command({"type": "shutdown"}, timeout_s=0.2, critical_retries=25)
+            except RuntimeError:
                 self._process.terminate()
 
-            self._process.join(timeout=timeout_s)
+            started_at = time.monotonic()
+            while (time.monotonic() - started_at) < timeout_s:
+                done_payload = self._poll_status_queue(done_only=True) or done_payload
+                if done_payload is not None:
+                    break
+                if not self._process.is_alive():
+                    break
+                self._process.join(timeout=0.25)
+
             if self._process.is_alive():
                 self._process.terminate()
                 self._process.join(timeout=5.0)
 
-        done_payload = self._poll_status_queue(done_only=True)
+        done_payload = self._poll_status_queue(done_only=True) or done_payload
         if self._error is not None:
             raise RuntimeError(self._error)
 
@@ -491,6 +533,7 @@ class AsyncViolationArtifactWriter:
         return {
             "artifact_paths": artifact_paths,
             "dropped_messages": self._dropped_messages,
+            "dropped_messages_by_type": self.dropped_messages_by_type,
             "artifact_dir": self.artifact_dir,
         }
 

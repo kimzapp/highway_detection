@@ -200,3 +200,57 @@ def test_get_violations_by_video_with_type_filter(tmp_path):
     invalid_vehicle_rows = store.get_violations_by_video(video_key, violation_type="INVALID_VEHICLE")
     assert len(invalid_vehicle_rows) == 1
     assert invalid_vehicle_rows[0]["violation_type"] == "INVALID_VEHICLE"
+
+
+def test_artifact_path_fallback_discovery_and_persist(tmp_path):
+    class LocalArtifactStore(ViolationStore):
+        def __init__(self, db_path: str, artifact_root: str):
+            self._artifact_root_override = artifact_root
+            super().__init__(db_path=db_path)
+
+        def _artifact_root_dir(self) -> str:
+            return self._artifact_root_override
+
+    db_path = str(tmp_path / "violations.db")
+    artifact_root = str(tmp_path / "violation_artifacts")
+    store = LocalArtifactStore(db_path=db_path, artifact_root=artifact_root)
+
+    video_path = str(tmp_path / "video_artifact_lookup.mp4")
+    metadata = _sample_metadata(video_path, fps=20.0)
+
+    frame_number = 15
+    tracker_id = 21
+    violation_type = "WRONG_LANE"
+    video_key = store.make_video_key(video_path)
+    violation_id = store.make_violation_id(video_key, tracker_id, violation_type, frame_number)
+
+    store.save_video_result(
+        video_metadata=metadata,
+        violations=[
+            {
+                "type": violation_type,
+                "tracker_id": tracker_id,
+                "class_id": 2,
+                "class_name": "car",
+                "position": (10, 20),
+                "bev_position": (5, 8),
+                "frame_number": frame_number,
+                "start_frame": frame_number,
+                "end_frame": frame_number + 3,
+                "artifact_clip_path": None,
+            }
+        ],
+    )
+
+    clip_dir = tmp_path / "violation_artifacts" / video_key
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = clip_dir / f"{violation_id}_trk{tracker_id}_{violation_type}_{frame_number}.mp4"
+    clip_path.write_bytes(b"\x00\x00\x00\x00")
+
+    rows = store.get_violations_by_video(video_key)
+    assert len(rows) == 1
+    assert rows[0]["artifact_clip_path"] == str(clip_path.resolve())
+
+    payload = store.get_video_result_by_key(video_key)
+    assert payload is not None
+    assert payload["violations"][0]["artifact_clip_path"] == str(clip_path.resolve())

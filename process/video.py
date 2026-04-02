@@ -1207,6 +1207,9 @@ class VideoProcessor:
             print(f"Dropped frames while writing: {async_writer.dropped_frames}")
         if show_progress and artifact_summary.get("dropped_messages", 0) > 0:
             print(f"Dropped artifact messages: {artifact_summary['dropped_messages']}")
+            dropped_by_type = artifact_summary.get("dropped_messages_by_type") or {}
+            if dropped_by_type:
+                print(f"Dropped artifact messages by type: {dropped_by_type}")
         
         if show_progress:
             print(f"\nDone! Processed {frame_count} frames")

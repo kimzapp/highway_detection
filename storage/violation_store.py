@@ -232,6 +232,42 @@ class ViolationStore:
         raw = f"{video_key}|{tracker_id}|{violation_type}|{frame_number}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
+    def _artifact_root_dir(self) -> str:
+        project_root = Path(__file__).resolve().parent.parent
+        return os.path.abspath(str(project_root / "outputs" / self.ARTIFACTS_DIR_NAME))
+
+    def _discover_artifact_clip_path(self, video_key: str, violation_id: str) -> Optional[str]:
+        artifact_dir = os.path.join(self._artifact_root_dir(), str(video_key))
+        if not os.path.isdir(artifact_dir):
+            return None
+
+        prefix = f"{violation_id}_"
+        try:
+            for entry in os.scandir(artifact_dir):
+                if not entry.is_file():
+                    continue
+                name = entry.name
+                if name.startswith(prefix) and name.lower().endswith(".mp4"):
+                    return os.path.abspath(entry.path)
+        except OSError:
+            return None
+
+        return None
+
+    def _resolve_artifact_clip_path(
+        self,
+        *,
+        video_key: str,
+        violation_id: str,
+        artifact_clip_path: Optional[str],
+    ) -> Optional[str]:
+        if artifact_clip_path:
+            normalized = os.path.abspath(str(artifact_clip_path))
+            if os.path.exists(normalized):
+                return normalized
+
+        return self._discover_artifact_clip_path(video_key=video_key, violation_id=violation_id)
+
     def save_video_result(
         self,
         video_metadata: Dict[str, Any],
@@ -478,7 +514,32 @@ class ViolationStore:
                 (video_key,),
             ).fetchall()
 
-        return self._build_video_payload(video_row, violation_rows)
+            updates: List[tuple[str, str]] = []
+            hydrated_rows: List[Dict[str, Any]] = []
+            for row in violation_rows:
+                record = dict(row)
+                resolved_path = self._resolve_artifact_clip_path(
+                    video_key=video_key,
+                    violation_id=str(record.get("violation_id") or ""),
+                    artifact_clip_path=record.get("artifact_clip_path"),
+                )
+                if resolved_path and resolved_path != record.get("artifact_clip_path"):
+                    record["artifact_clip_path"] = resolved_path
+                    updates.append((resolved_path, str(record.get("violation_id") or "")))
+                hydrated_rows.append(record)
+
+            if updates:
+                conn.executemany(
+                    """
+                    UPDATE violations
+                    SET artifact_clip_path = ?
+                    WHERE violation_id = ?
+                    """,
+                    updates,
+                )
+                conn.commit()
+
+        return self._build_video_payload_from_dicts(dict(video_row), hydrated_rows)
 
     def get_violations_by_video(
         self,
@@ -503,13 +564,55 @@ class ViolationStore:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
 
+            updates: List[tuple[str, str]] = []
+            hydrated_records: List[Dict[str, Any]] = []
+            for row in rows:
+                record = dict(row)
+                resolved_path = self._resolve_artifact_clip_path(
+                    video_key=video_key,
+                    violation_id=str(record.get("violation_id") or ""),
+                    artifact_clip_path=record.get("artifact_clip_path"),
+                )
+                if resolved_path and resolved_path != record.get("artifact_clip_path"):
+                    record["artifact_clip_path"] = resolved_path
+                    updates.append((resolved_path, str(record.get("violation_id") or "")))
+                hydrated_records.append(record)
+
+            if updates:
+                conn.executemany(
+                    """
+                    UPDATE violations
+                    SET artifact_clip_path = ?
+                    WHERE violation_id = ?
+                    """,
+                    updates,
+                )
+                conn.commit()
+
         violations: List[Dict[str, Any]] = []
-        for row in rows:
-            record = dict(row)
+        for record in hydrated_records:
             record["position"] = [record.pop("camera_x"), record.pop("camera_y")]
             record["bev_position"] = [record.pop("bev_x"), record.pop("bev_y")]
             violations.append(record)
         return violations
+
+    def _build_video_payload_from_dicts(
+        self,
+        video: Dict[str, Any],
+        violation_records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        video["processing_config"] = json.loads(video.pop("processing_config_json"))
+
+        violations: List[Dict[str, Any]] = []
+        for record in violation_records:
+            record["position"] = [record.pop("camera_x"), record.pop("camera_y")]
+            record["bev_position"] = [record.pop("bev_x"), record.pop("bev_y")]
+            violations.append(record)
+
+        return {
+            "video": video,
+            "violations": violations,
+        }
 
     def _build_video_payload(
         self,
