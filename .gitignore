@@ -14,3 +14,5 @@ release/release_info.txt
 release/VERSION
 release/*.log
 *.db
+*.exe
+artifact_storage
